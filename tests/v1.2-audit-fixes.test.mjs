@@ -1078,7 +1078,20 @@ test("Audit P1/P2/P3 (H-6, H-19, H-20, H-21, H-22, M-1..M-6, P3-4): hooks & filt
 
     assert.equal(isSafeRegex("一+丁+"), true, "P3-4: distinct CJK chars must not collide in single bucket");
     assert.equal(isSafeRegex("一+一+"), false, "P3-4: identical CJK repeated chars should still be flagged");
-    assert.equal(isSafeRegex("(?-i:A|a)+"), true, "P3-4: ES2025 (?-i:A|a)+ is case-sensitive and unambiguous");
+    const supportsRegexModifiers = (() => {
+      try {
+        new RegExp("(?-i:a)", "i");
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    if (supportsRegexModifiers) {
+      assert.equal(isSafeRegex("(?-i:A|a)+"), true, "P3-4: ES2025 (?-i:A|a)+ is case-sensitive and unambiguous");
+      assert.equal(isSafeRegex("(?i:A|a)+"), false, "P3-4: ES2025 (?i:A|a)+ is case-insensitive and ambiguous");
+    } else {
+      assert.equal(isSafeRegex("(?-i:A|a)+"), false, "P3-4: unsupported ES2025 modifier syntax must fail closed on Node 22");
+    }
   } finally {
     for (const s of openStores) {
       try { s.close(); } catch {}

@@ -7,8 +7,6 @@ import os from "node:os";
 import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getEffectiveConfig } from "../../context/lib/config.js";
-import { ContextModeStore, FILE_CATEGORIES } from "../../context/lib/store.js";
-suppressSqliteExperimentalWarning();
 import { buildHandoffBrief, inferWorkspaceFromStore } from "../../context/lib/handoff.js";
 import {
   analyzeTranscriptCache,
@@ -25,6 +23,11 @@ import {
   readTranscriptTail,
   resolveModelProfile
 } from "../../context/lib/cache-analyzer.js";
+
+// Dynamically load store.js AFTER suppressSqliteExperimentalWarning() runs so Node 22 does not emit
+// `ExperimentalWarning: SQLite` during static ESM builtin linking before compile-cache.mjs executes.
+suppressSqliteExperimentalWarning();
+const { ContextModeStore, FILE_CATEGORIES } = await import("../../context/lib/store.js");
 
 const __selfPath = path.resolve(fileURLToPath(import.meta.url));
 const __dirname = path.dirname(__selfPath);

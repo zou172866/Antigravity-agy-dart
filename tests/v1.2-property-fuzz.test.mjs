@@ -287,6 +287,15 @@ test("Property 2: ReDoS validator rejects catastrophic patterns, accepts safe pa
     assert.equal(isSafeRegex(p), false, `ReDoS pattern MUST be rejected: ${p}`);
   }
 
+  const supportsRegexModifiers = (() => {
+    try {
+      new RegExp("(?-i:a)", "i");
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   const mustAccept = [
     "^FAIL\\b",
     "error\\[\\d+\\]",
@@ -326,8 +335,8 @@ test("Property 2: ReDoS validator rejects catastrophic patterns, accepts safe pa
     "https?://[a-z0-9.-]+/[a-z0-9_./-]+",
     "ERROR.*\\(\\d+(?:\\.\\d+)?\\s*m?s\\)",
     "ERROR.*:\\d+:\\d+:\\d+",
-    // Round-3 P0-3 & P2-1: safe inline case-sensitive, prefix-delimited bounded groups, and top-level alternations
-    "^(?-i:[A-Z]+[a-z]+)$",
+    // Round-3 P0-3 & P2-1: safe inline case-sensitive (Node 24+ / V8 >= 12.5), prefix-delimited bounded groups, and top-level alternations
+    ...(supportsRegexModifiers ? ["^(?-i:[A-Z]+[a-z]+)$"] : []),
     "^[a-z]+(?:-[a-z]+){1,5}$",
     "^\\d+(?:\\.\\d+){1,3}$",
     "^\\s*FAIL\\s+.*|^\\s*ERROR\\s+.*",
@@ -336,6 +345,13 @@ test("Property 2: ReDoS validator rejects catastrophic patterns, accepts safe pa
   ];
   for (const p of mustAccept) {
     assert.equal(isSafeRegex(p), true, `Safe pattern MUST be accepted: ${p}`);
+  }
+  if (!supportsRegexModifiers) {
+    assert.equal(
+      isSafeRegex("^(?-i:[A-Z]+[a-z]+)$"),
+      false,
+      "Unsupported ES2025 inline modifier syntax must fail closed on runtimes without V8 >= 12.5"
+    );
   }
   // Verify accepted P2-2 & unanchored optional patterns stay fast on 4,000-char adversarial lines
   const advInputs = [
