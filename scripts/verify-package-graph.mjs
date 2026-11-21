@@ -1005,8 +1005,17 @@ export function discoverRuntimeEntrypoints(rootDir = REPO_ROOT) {
       return;
     }
     if (typeof node.command === "string") {
-      const m = node.command.match(/\bnode\s+(?:\.\/)?([^\s"']+\.m?js)/i);
-      if (m) entries.add(m[1].replace(/\\/g, "/"));
+      const m = node.command.match(
+        /\bnode(?:\.exe)?(?:\s+--?[A-Za-z0-9_=-]+)*\s+(?:"([^"]+\.(?:m?js|cjs))"|'([^']+\.(?:m?js|cjs))'|([^\s"']+\.(?:m?js|cjs)))/i
+      );
+      const rawScript = m ? (m[1] || m[2] || m[3]) : null;
+      if (rawScript) {
+        const cleaned = rawScript
+          .replace(/^\$\{PLUGIN_ROOT\}[\\/]/, "")
+          .replace(/^\.[\\/]/, "")
+          .replace(/\\/g, "/");
+        entries.add(cleaned);
+      }
     }
     for (const v of Object.values(node)) collectHookCommands(v);
   };

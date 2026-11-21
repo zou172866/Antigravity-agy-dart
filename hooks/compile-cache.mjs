@@ -43,7 +43,7 @@ function readCompileCacheConfigOverrides() {
         ? path.resolve(process.env.AGY_DART_CONFIG_PATH.trim())
         : path.join(os.homedir(), ".agy-dart", "config.json");
     if (!fs.existsSync(cfgPath)) return {};
-    const parsed = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, "utf8").replace(/^\uFEFF/, ""));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
@@ -78,7 +78,7 @@ export function sanitizeCacheTag(raw) {
 
 function isSubPath(rootDir, targetPath) {
   const rel = path.relative(rootDir, targetPath);
-  return Boolean(rel) && !rel.startsWith("..") && !path.isAbsolute(rel);
+  return Boolean(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel);
 }
 
 /**

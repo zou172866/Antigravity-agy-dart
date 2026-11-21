@@ -138,6 +138,14 @@ export function parseGitSubcommand(cmd) {
         i++;
         let closed = false;
         while (i < len) {
+          if (quote === '"' && cmd[i] === "\\" && i + 1 < len) {
+            const nxt = cmd[i + 1];
+            if (nxt === '"' || nxt === "\\") {
+              unquoted += nxt;
+              i += 2;
+              continue;
+            }
+          }
           if (cmd[i] === quote) {
             i++;
             closed = true;
@@ -220,6 +228,24 @@ export function hasUnsafeShellSyntax(cmd) {
   if (/[\r\n\0|;&<>`$()%!{}]/.test(cmd)) return true;
   // PowerShell splatting (`@var`), array/hash/here-string (`@(`, `@{`, `@"`, `@'`), or cmd `@echo`
   if (/(?:^|\s)@|@[({"']/.test(cmd)) return true;
+  // Reject unquoted `#` (PowerShell / POSIX shell comment truncates subsequent arguments)
+  {
+    let q = null;
+    for (let i = 0; i < cmd.length; i++) {
+      const ch = cmd[i];
+      if (q) {
+        if (q === '"' && ch === "\\" && i + 1 < cmd.length) {
+          i++;
+          continue;
+        }
+        if (ch === q) q = null;
+      } else if (ch === "'" || ch === '"') {
+        q = ch;
+      } else if (ch === "#") {
+        return true;
+      }
+    }
+  }
   // Caret `^`: cmd.exe escape char. Only allow benign git parent-revspec suffixes (e.g. `git diff HEAD^`, `HEAD^1..HEAD`).
   if (cmd.includes("^")) {
     const gitParsed = parseGitSubcommand(cmd);
@@ -383,14 +409,24 @@ export function isSafeRegex(source) {
     return null;
   };
 
-  // Exact ASCII (0..127) bitmask + 2 disjoint non-ASCII buckets (whitespace vs non-whitespace).
+  // Exact ASCII (0..127) bitmask + non-ASCII whitespace flag + non-ASCII wildcard flag + exact non-ASCII code point set.
   // ASCII letters are case-folded whenever ignoreCase is active (root compiles with `/i`, toggled by `(?-i:...)`).
-  const csEmpty = () => [0, 0, 0, 0, false, false];
-  const csClone = (cs) => [cs[0], cs[1], cs[2], cs[3], cs[4], cs[5]];
-  const csAll = () => [0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, true, true];
+  const csEmpty = () => [0, 0, 0, 0, false, false, null];
+  const csClone = (cs) => [cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], cs[6] ? new Set(cs[6]) : null];
+  const csAll = () => [0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, true, true, null];
 
   const csAddBitRaw = (cs, code) => {
     cs[code >>> 5] = (cs[code >>> 5] | (1 << (code & 31))) >>> 0;
+  };
+
+  const csAddNonAsciiCode = (cs, code) => {
+    if (cs[5]) return;
+    if (!cs[6]) cs[6] = new Set();
+    cs[6].add(code);
+    if (cs[6].size > 32) {
+      cs[5] = true;
+      cs[6] = null;
+    }
   };
 
   const csAddCode = (cs, code, ignoreCase = true) => {
@@ -401,8 +437,24 @@ export function isSafeRegex(source) {
         else if (code >= 97 && code <= 122) csAddBitRaw(cs, code - 32);
       }
     } else if (code >= 128) {
-      if (/\s/.test(String.fromCodePoint(code))) cs[4] = true;
-      else cs[5] = true;
+      const ch = String.fromCodePoint(code);
+      if (/\s/.test(ch)) {
+        cs[4] = true;
+      } else {
+        csAddNonAsciiCode(cs, code);
+        if (ignoreCase) {
+          const lo = ch.toLowerCase();
+          const hi = ch.toUpperCase();
+          if (lo.length === 1) {
+            const lc = lo.codePointAt(0);
+            if (lc >= 128) csAddNonAsciiCode(cs, lc);
+          }
+          if (hi.length === 1) {
+            const hc = hi.codePointAt(0);
+            if (hc >= 128) csAddNonAsciiCode(cs, hc);
+          }
+        }
+      }
     }
   };
 
@@ -418,19 +470,52 @@ export function isSafeRegex(source) {
     dst[2] = (dst[2] | src[2]) >>> 0;
     dst[3] = (dst[3] | src[3]) >>> 0;
     if (src[4]) dst[4] = true;
-    if (src[5]) dst[5] = true;
+    if (src[5]) {
+      dst[5] = true;
+      dst[6] = null;
+    } else if (!dst[5] && src[6]) {
+      for (const cp of src[6]) {
+        csAddNonAsciiCode(dst, cp);
+        if (dst[5]) break;
+      }
+    }
     return dst;
   };
 
-  const csOverlaps = (a, b) =>
-    ((a[0] & b[0]) | (a[1] & b[1]) | (a[2] & b[2]) | (a[3] & b[3])) !== 0 ||
-    (a[4] && b[4]) ||
-    (a[5] && b[5]);
+  const csOverlaps = (a, b) => {
+    if (
+      ((a[0] & b[0]) | (a[1] & b[1]) | (a[2] & b[2]) | (a[3] & b[3])) !== 0 ||
+      (a[4] && b[4]) ||
+      (a[5] && b[5])
+    ) {
+      return true;
+    }
+    if (a[5] && b[6] && b[6].size > 0) return true;
+    if (b[5] && a[6] && a[6].size > 0) return true;
+    if (a[6] && b[6]) {
+      for (const cp of a[6]) {
+        if (b[6].has(cp)) return true;
+      }
+    }
+    return false;
+  };
 
-  const csEquals = (a, b) =>
-    a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] && a[5] === b[5];
+  const csEquals = (a, b) => {
+    if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2] || a[3] !== b[3] || a[4] !== b[4] || a[5] !== b[5]) {
+      return false;
+    }
+    const sa = a[6];
+    const sb = b[6];
+    if (!sa && !sb) return true;
+    if (!sa || !sb || sa.size !== sb.size) return false;
+    for (const cp of sa) {
+      if (!sb.has(cp)) return false;
+    }
+    return true;
+  };
 
-  const csIsEmpty = (cs) => (cs[0] | cs[1] | cs[2] | cs[3]) === 0 && !cs[4] && !cs[5];
+  const csIsEmpty = (cs) =>
+    (cs[0] | cs[1] | cs[2] | cs[3]) === 0 && !cs[4] && !cs[5] && (!cs[6] || cs[6].size === 0);
 
   const buildRangeCs = (ranges, nonAsciiSpace = false, nonAsciiNonSpace = false) => {
     const cs = csEmpty();
@@ -439,15 +524,16 @@ export function isSafeRegex(source) {
     }
     cs[4] = nonAsciiSpace;
     cs[5] = nonAsciiNonSpace;
+    if (nonAsciiNonSpace) cs[6] = null;
     return cs;
   };
 
   const CS_DIGIT = buildRangeCs([[48, 57]], false, false);
-  const CS_NON_DIGIT = [~CS_DIGIT[0] >>> 0, ~CS_DIGIT[1] >>> 0, ~CS_DIGIT[2] >>> 0, ~CS_DIGIT[3] >>> 0, true, true];
+  const CS_NON_DIGIT = [~CS_DIGIT[0] >>> 0, ~CS_DIGIT[1] >>> 0, ~CS_DIGIT[2] >>> 0, ~CS_DIGIT[3] >>> 0, true, true, null];
   const CS_WORD = buildRangeCs([[48, 57], [65, 90], [95, 95], [97, 122]], false, false);
-  const CS_NON_WORD = [~CS_WORD[0] >>> 0, ~CS_WORD[1] >>> 0, ~CS_WORD[2] >>> 0, ~CS_WORD[3] >>> 0, true, true];
+  const CS_NON_WORD = [~CS_WORD[0] >>> 0, ~CS_WORD[1] >>> 0, ~CS_WORD[2] >>> 0, ~CS_WORD[3] >>> 0, true, true, null];
   const CS_SPACE = buildRangeCs([[9, 13], [32, 32]], true, false);
-  const CS_NON_SPACE = [~CS_SPACE[0] >>> 0, ~CS_SPACE[1] >>> 0, ~CS_SPACE[2] >>> 0, ~CS_SPACE[3] >>> 0, false, true];
+  const CS_NON_SPACE = [~CS_SPACE[0] >>> 0, ~CS_SPACE[1] >>> 0, ~CS_SPACE[2] >>> 0, ~CS_SPACE[3] >>> 0, false, true, null];
   const CS_ALL = csAll();
   const CS_DOT = (() => {
     const cs = csAll();
@@ -556,6 +642,7 @@ export function isSafeRegex(source) {
           if (second.code >= 128) {
             cs[4] = true;
             cs[5] = true;
+            cs[6] = null;
           }
           p = second.end;
           continue;
@@ -585,7 +672,8 @@ export function isSafeRegex(source) {
           ~cs[2] >>> 0,
           ~cs[3] >>> 0,
           !coversAllNonAsciiSpace,
-          !coversAllNonAsciiNonSpace
+          !coversAllNonAsciiNonSpace,
+          null
         ]
       };
     }
@@ -684,11 +772,11 @@ export function isSafeRegex(source) {
     return kept;
   };
 
-  const hasAmbiguousAlternation = (branches) => {
+  const hasAmbiguousAlternation = (branches, ignoreCase = true) => {
     if (branches.length < 2) return false;
     const seen = new Set();
     for (const raw of branches) {
-      const b = raw.toLowerCase();
+      const b = ignoreCase ? raw.toLowerCase() : raw;
       if (!b) return true;
       // Wildcards / character classes / escapes / anchors / nested groups in quantified alternation risk exponential overlap
       if (/[.[\\+*?{(^$]/.test(b)) return true;
@@ -720,11 +808,18 @@ export function isSafeRegex(source) {
 
   const mergePreOptionalInto = (target, src) => {
     for (const item of src) {
-      if (target.length >= 16) break;
       const dup = target.some(
         (t) => t.bits === item.bits && t.unanchored === item.unanchored && csEquals(t.cs, item.cs)
       );
-      if (!dup) {
+      if (dup) continue;
+      if (target.length >= 16) {
+        // Never drop budget tracking past cap: conservatively fold into last bucket
+        const last = target[target.length - 1];
+        csUnionInto(last.cs, item.cs);
+        last.bits = Math.min(MAX_NONDET_CHOICE_BITS, last.bits + item.bits);
+        last.unanchored = last.unanchored || item.unanchored;
+        last.upgraded = false;
+      } else {
         target.push({ cs: csClone(item.cs), bits: item.bits, unanchored: item.unanchored, upgraded: false });
       }
     }
@@ -784,7 +879,15 @@ export function isSafeRegex(source) {
   };
 
   const recordPreOptionalChoice = (cs, bits, unanchored) => {
-    if (!cs || csIsEmpty(cs) || bits <= 0 || preOptionalChoices.length >= 16) return;
+    if (!cs || csIsEmpty(cs) || bits <= 0) return;
+    if (preOptionalChoices.length >= 16) {
+      const last = preOptionalChoices[preOptionalChoices.length - 1];
+      csUnionInto(last.cs, cs);
+      last.bits = Math.min(MAX_NONDET_CHOICE_BITS, last.bits + bits);
+      last.unanchored = last.unanchored || unanchored;
+      last.upgraded = false;
+      return;
+    }
     preOptionalChoices.push({ cs: csClone(cs), bits, unanchored, upgraded: false });
   };
 
@@ -1033,7 +1136,7 @@ export function isSafeRegex(source) {
         preOptionalChoices = frame.branchMergedPreOptionalChoices;
       }
 
-      const selfAmbiguous = frame.hasAlternation && hasAmbiguousAlternation(frame.branches);
+      const selfAmbiguous = frame.hasAlternation && hasAmbiguousAlternation(frame.branches, frame.inIgnoreCase);
       const groupHasAmbiguousAlt = frame.hasAmbiguousAlt || selfAmbiguous;
 
       let outgoingPrev = null;
@@ -1253,10 +1356,12 @@ function filterGitDiff(combined, exitCode) {
   const lines = combined.split("\n");
   const files = [];
   let curFile = null;
+  let inHunk = false;
   const compactHunks = [];
 
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
+      inHunk = false;
       const mQuoted = /^diff --git "a\/(.+?)" "b\/(.+)"$/.exec(line);
       const mPlain = !mQuoted ? /^diff --git a\/(.+?) b\/(.+)$/.exec(line) : null;
       const name = mQuoted ? mQuoted[2] : mPlain ? mPlain[2] : line.slice(11);
@@ -1265,10 +1370,11 @@ function filterGitDiff(combined, exitCode) {
       compactHunks.push(`=== ${name}`);
       continue;
     }
-    if (line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) {
+    if (!inHunk && (line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ "))) {
       continue;
     }
     if (line.startsWith("@@ ")) {
+      inHunk = true;
       compactHunks.push(line);
       continue;
     }

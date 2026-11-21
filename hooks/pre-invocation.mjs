@@ -19,18 +19,26 @@ function readStdin(timeoutMs = 1000) {
   return new Promise((resolve) => {
     let data = "";
     let settled = false;
+    const onData = (chunk) => {
+      data += chunk;
+    };
     const done = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", done);
+      process.stdin.off("error", done);
+      try {
+        process.stdin.pause();
+        process.stdin.unref?.();
+      } catch {}
       resolve(data);
     };
     const timer = setTimeout(done, timeoutMs);
     timer.unref();
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
+    process.stdin.on("data", onData);
     process.stdin.on("end", done);
     process.stdin.on("error", done);
   });
@@ -288,13 +296,16 @@ async function main() {
 
     const { analyzeTranscriptCache, findTranscriptForConversation, readTranscriptTail } = cacheAnalyzerMod;
 
+    const targetConvId = directConvId && directConvId !== "default" ? directConvId : sessionId;
+    const isSubagentConv = Boolean(directConvId && directConvId !== "default" && directConvId !== sessionId);
+
     let transcriptPath =
       typeof payload.transcriptPath === "string" && payload.transcriptPath.trim()
         ? payload.transcriptPath.trim()
         : "";
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      if (sessionId && sessionId !== "default") {
-        transcriptPath = findTranscriptForConversation(sessionId, { exactOnly: true }) || "";
+      if (targetConvId && targetConvId !== "default") {
+        transcriptPath = findTranscriptForConversation(targetConvId, { exactOnly: true }) || "";
       }
     }
 
@@ -309,30 +320,40 @@ async function main() {
         if (effectiveCfg.criticalTokens !== null) diagOpts.criticalTokens = effectiveCfg.criticalTokens;
         diag = analyzeTranscriptCache(steps, diagOpts);
 
-        // Auto-invalidate file_reads & file_snapshots on compaction even when cacheWatch is off or paused
-        const lastBust = diag.recentBusts[diag.recentBusts.length - 1];
-        if (lastBust && lastBust.cause === "compaction_or_truncation") {
-          const lastCompactKey = `compact_invalidated:${sessionId}`;
-          const stamp = String(lastBust.at || lastBust.stepIndex);
+        // Auto-invalidate file_reads & file_snapshots on compaction even when cacheWatch is off or paused.
+        // Reverse-scan so a later TTL bust never masks an earlier compaction bust, and bind to targetConvId
+        // so subagent compaction never wipes the parent conversation's file_reads.
+        let latestCompactBust = null;
+        for (let bi = diag.recentBusts.length - 1; bi >= 0; bi--) {
+          if (diag.recentBusts[bi]?.cause === "compaction_or_truncation") {
+            latestCompactBust = diag.recentBusts[bi];
+            break;
+          }
+        }
+        if (latestCompactBust) {
+          const lastCompactKey = `compact_invalidated:${targetConvId}`;
+          const stamp = latestCompactBust.at
+            ? `at:${latestCompactBust.at}:${latestCompactBust.prevCtxTokens}:${latestCompactBust.currCtxTokens}`
+            : latestCompactBust.hasExplicitStepIndex
+              ? `step:${latestCompactBust.stepIndex}:${latestCompactBust.prevCtxTokens}:${latestCompactBust.currCtxTokens}`
+              : `sig:${latestCompactBust.prevCtxTokens}:${latestCompactBust.currCtxTokens}:${latestCompactBust.wastedTokens ?? 0}`;
           if (store.getTimedMeta(lastCompactKey, "") !== stamp) {
-            store.invalidateFileReads(sessionId, null);
-            if (directConvId && directConvId !== sessionId) {
-              store.invalidateFileReads(directConvId, null);
-            }
+            store.invalidateFileReads(targetConvId, null);
             store.setTimedMeta(lastCompactKey, stamp);
           }
         }
       }
     }
 
-    if (!effectiveCfg.cacheWatch || store.isPaused(sessionId) || !diag) {
+    // Inherit parent pause state for subagents, while isolating alert suppression keys per direct conversation
+    if (!effectiveCfg.cacheWatch || store.isPaused(sessionId) || (isSubagentConv && store.isPaused(targetConvId)) || !diag) {
       store.close();
       store = null;
       process.stdout.write("{}\n");
       return;
     }
 
-    const alerts = evaluateCacheAlerts(diag, { sessionId, store });
+    const alerts = evaluateCacheAlerts(diag, { sessionId: targetConvId, store });
     store.close();
     store = null;
 

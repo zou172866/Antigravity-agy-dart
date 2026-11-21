@@ -195,7 +195,7 @@ function resolveReferenceInputPrice(matched, rawModelName) {
   if (matched.id === "claude-1m" || matched.id === "claude-200k") {
     if (/haiku/i.test(rawModelName)) return 1.00;
     if (/opus/i.test(rawModelName)) {
-      if (/4[._-][56]\b/i.test(rawModelName)) return 5.00;
+      if (/(?:^|[^0-9])4[._-][56](?:$|[^0-9])/i.test(rawModelName)) return 5.00;
       return 15.00;
     }
     return matched.inputPer1M;

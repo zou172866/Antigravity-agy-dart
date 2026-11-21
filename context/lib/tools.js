@@ -97,7 +97,7 @@ export async function fetchUrlText(urlStr, timeoutOrOptions = 15000) {
     }
 
     const { parsed, pinned, pinnedRecords } = await validateFetchTarget(currentUrl, {
-      allowPrivate: Boolean(opts.allowPrivate),
+      ...(opts.allowPrivate !== undefined ? { allowPrivate: Boolean(opts.allowPrivate) } : {}),
       lookupFn: opts.lookupFn
     });
 
@@ -189,17 +189,42 @@ export async function fetchUrlText(urlStr, timeoutOrOptions = 15000) {
           }
           const chunks = [];
           let total = 0;
+          let truncatedByLimit = false;
           const doneBody = () => {
-            finishResolve({ body: Buffer.concat(chunks).toString("utf8") });
+            let buf = Buffer.concat(chunks);
+            if (truncatedByLimit && buf.length > 0) {
+              let start = buf.length - 1;
+              while (start > 0 && (buf[start] & 0xc0) === 0x80) {
+                start -= 1;
+              }
+              const lead = buf[start];
+              let expectedLen = 1;
+              if ((lead & 0xe0) === 0xc0) expectedLen = 2;
+              else if ((lead & 0xf0) === 0xe0) expectedLen = 3;
+              else if ((lead & 0xf8) === 0xf0) expectedLen = 4;
+              if (buf.length - start < expectedLen) {
+                buf = buf.subarray(0, start);
+              }
+            }
+            finishResolve({ body: buf.toString("utf8") });
           };
           res.on("data", (c) => {
             if (settled) return;
             if (total < maxBodyBytes) {
               const remain = maxBodyBytes - total;
-              chunks.push(c.byteLength <= remain ? c : c.subarray(0, remain));
-              total += Math.min(c.byteLength, remain);
+              if (c.byteLength > remain) {
+                truncatedByLimit = true;
+                chunks.push(c.subarray(0, remain));
+                total += remain;
+              } else {
+                chunks.push(c);
+                total += c.byteLength;
+              }
+            } else {
+              truncatedByLimit = true;
             }
             if (total >= maxBodyBytes) {
+              truncatedByLimit = true;
               doneBody();
               res.destroy();
               req.destroy();
@@ -462,7 +487,7 @@ export function createTools({
         sourceId: indexed.sourceId,
         deduplicated,
         rawBytes: totalRawBytes,
-        returnedBytes: 0,
+        returnedBytes: 9999,
         ...(redactedBatch.redactedCount > 0 ? { redactedSecrets: redactedBatch.redactedCount } : {}),
         content: ""
       };
@@ -523,8 +548,21 @@ export function createTools({
         if (!fs.existsSync(absPath)) {
           throw new Error(`File not found: ${filePath}`);
         }
-        const sens = detectSensitiveFile(absPath);
+        let realAbsPath = absPath;
+        try {
+          realAbsPath = fs.realpathSync(absPath);
+        } catch {
+          // ignore
+        }
+        const sensDirect = detectSensitiveFile(absPath);
+        const sensReal = realAbsPath !== absPath ? detectSensitiveFile(realAbsPath) : { sensitive: false, reason: null };
+        const sens = sensDirect.sensitive ? sensDirect : sensReal;
         if (sens.sensitive) {
+          if (getSensitiveFileGuardMode() === "deny") {
+            throw new Error(
+              `Blocked indexing sensitive file '${path.basename(absPath)}' (${sens.reason}) because sensitiveFileGuard is set to 'deny'.`
+            );
+          }
           sensitiveFileWarning = isSecretRedactionEnabled()
             ? `Indexed file '${path.basename(absPath)}' matches sensitive pattern (${sens.reason}); detected credentials were redacted before indexing.`
             : `Indexed file '${path.basename(absPath)}' matches sensitive pattern (${sens.reason}); warning: secret redaction is currently disabled.`;
@@ -534,6 +572,12 @@ export function createTools({
 
       if (!rawText) {
         throw new Error("No content, file path, or url provided to index");
+      }
+
+      if (resolvedLabel) {
+        resolvedLabel = /^https?:\/\//i.test(resolvedLabel)
+          ? sanitizeUrlForDisplay(resolvedLabel)
+          : redactSecrets(resolvedLabel).text;
       }
 
       const redacted = redactSecrets(rawText);
@@ -599,32 +643,53 @@ export function createTools({
 
       // Enforce <= 8.8 KB total JSON response UTF-8 cap (prevents Antigravity disk spills on large/CJK hits)
       const MAX_SEARCH_JSON_BYTES = 8600;
+      const rawQueries = Array.isArray(queries) ? queries : typeof queries === "string" ? [queries] : [];
+      const echoedQueries = rawQueries.slice(0, 20).map((q) => {
+        const s = String(q ?? "");
+        return Buffer.byteLength(s, "utf8") > 200 ? `${truncateUtf8(s, 196)}...` : s;
+      });
       const boundedHits = [];
-      let totalBytes = Buffer.byteLength(
-        JSON.stringify({ queries, totalMatches: res.totalMatches, returned: 0, offset: res.offset, hits: [] }, null, 2),
-        "utf8"
-      );
-      for (const hit of res.hits) {
-        const entry = { ...hit };
-        let entryBytes = Buffer.byteLength(JSON.stringify(entry, null, 2), "utf8") + 4;
-        if (totalBytes + entryBytes > MAX_SEARCH_JSON_BYTES) {
-          const remaining = MAX_SEARCH_JSON_BYTES - totalBytes - 180;
-          if (remaining < 160) break;
-          entry.snippet = truncateUtf8(entry.snippet, remaining) + "\n... [capped <=8.8KB]";
-          entryBytes = Buffer.byteLength(JSON.stringify(entry, null, 2), "utf8") + 4;
-          if (totalBytes + entryBytes > MAX_SEARCH_JSON_BYTES) break;
-        }
-        boundedHits.push(entry);
-        totalBytes += entryBytes;
-      }
-
-      return {
-        queries,
+      const payload = {
+        queries: echoedQueries,
         totalMatches: res.totalMatches,
-        returned: boundedHits.length,
+        returned: 0,
         offset: res.offset,
         hits: boundedHits
       };
+      const measurePayload = () => Buffer.byteLength(JSON.stringify(payload, null, 2), "utf8");
+      const snipSuffix = "\n... [capped <=8.8KB]";
+      for (const hit of res.hits) {
+        const entry = { ...hit };
+        boundedHits.push(entry);
+        payload.returned = boundedHits.length;
+        if (measurePayload() <= MAX_SEARCH_JSON_BYTES) {
+          continue;
+        }
+        // Binary-search snippet length to fit exact outer JSON byte cap
+        const origSnippet = typeof entry.snippet === "string" ? entry.snippet : "";
+        let lo = 0;
+        let hi = Buffer.byteLength(origSnippet, "utf8");
+        let best = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          const cand = truncateUtf8(origSnippet, mid);
+          entry.snippet = `${cand}${snipSuffix}`;
+          if (measurePayload() <= MAX_SEARCH_JSON_BYTES) {
+            best = cand;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (best === null || (origSnippet.length > 0 && best.length === 0)) {
+          boundedHits.pop();
+          payload.returned = boundedHits.length;
+          break;
+        }
+        entry.snippet = `${best}${snipSuffix}`;
+      }
+
+      return payload;
     },
 
     // 5. ctx_resume
@@ -635,7 +700,7 @@ export function createTools({
           : null;
       const sessionId = explicitSid || getSessionId();
       if (seq !== null && seq !== undefined) {
-        const ev = store.getEventBySeq(seq);
+        const ev = store.getEventBySeq(seq, sessionId);
         if (!ev) throw new Error(`Event sequence #${seq} not found`);
         const boundedEv = { ...ev };
         if (typeof boundedEv.body === "string") {

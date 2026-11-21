@@ -44,41 +44,108 @@ export function countTestCasesInSource(src) {
   const tokens = tokenizeJsForSpecifiers(src);
   let count = 0;
   const TEST_SUBMETHODS = new Set(["skip", "only", "todo", "it", "test"]);
+  const SUITE_SUBMETHODS = new Set(["skip", "only", "todo", "concurrent"]);
+  const suiteBodyOpenIndices = new Set();
+  const suiteBraceStack = [];
+
+  const isCallStartAfter = (idx, submethods) => {
+    const next = tokens[idx + 1];
+    if (next?.type === "punct" && next.value === "(") return idx + 1;
+    if (
+      next?.type === "punct" &&
+      next.value === "?" &&
+      tokens[idx + 2]?.type === "punct" &&
+      tokens[idx + 2].value === "." &&
+      tokens[idx + 3]?.type === "punct" &&
+      tokens[idx + 3].value === "("
+    ) {
+      return idx + 3;
+    }
+    if (
+      next?.type === "punct" &&
+      next.value === "." &&
+      tokens[idx + 2]?.type === "ident" &&
+      submethods.has(tokens[idx + 2].value)
+    ) {
+      if (tokens[idx + 3]?.type === "punct" && tokens[idx + 3].value === "(") return idx + 3;
+      if (
+        tokens[idx + 3]?.type === "punct" &&
+        tokens[idx + 3].value === "?" &&
+        tokens[idx + 4]?.type === "punct" &&
+        tokens[idx + 4].value === "." &&
+        tokens[idx + 5]?.type === "punct" &&
+        tokens[idx + 5].value === "("
+      ) {
+        return idx + 5;
+      }
+    }
+    return -1;
+  };
+
+  const markSuiteCallbackBrace = (openParenIdx) => {
+    let pDepth = 0;
+    let bDepth = 0;
+    let expectFnBodyBrace = false;
+    for (let k = openParenIdx; k < tokens.length; k++) {
+      const t = tokens[k];
+      if (t.type === "punct" && t.value === "(") {
+        pDepth += 1;
+      } else if (t.type === "punct" && t.value === ")") {
+        pDepth -= 1;
+        if (pDepth === 0) break;
+      } else if (t.type === "punct" && t.value === "{") {
+        if (pDepth === 1 && bDepth === 0 && expectFnBodyBrace) {
+          suiteBodyOpenIndices.add(k);
+          return;
+        }
+        bDepth += 1;
+      } else if (t.type === "punct" && t.value === "}") {
+        bDepth = Math.max(0, bDepth - 1);
+      } else if (pDepth === 1 && bDepth === 0) {
+        if (t.type === "punct" && t.value === ">" && tokens[k - 1]?.type === "punct" && tokens[k - 1].value === "=") {
+          expectFnBodyBrace = true;
+        } else if (t.type === "ident" && t.value === "function") {
+          expectFnBodyBrace = true;
+        } else if (t.type === "punct" && t.value === ",") {
+          expectFnBodyBrace = false;
+        }
+      }
+    }
+  };
+
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
+    if (tok.type === "punct" && tok.value === "{") {
+      suiteBraceStack.push(suiteBodyOpenIndices.has(i));
+      continue;
+    }
+    if (tok.type === "punct" && tok.value === "}") {
+      suiteBraceStack.pop();
+      continue;
+    }
+    if (tok.type !== "ident" || tok.isMemberProp) continue;
+    const inSuiteScope = suiteBraceStack.length === 0 || suiteBraceStack.every(Boolean);
+    if (!inSuiteScope) continue;
+
     const prev = i > 0 ? tokens[i - 1] : null;
     const prev2 = i > 1 ? tokens[i - 2] : null;
-    const next = tokens[i + 1];
     const isExcludedLead =
       (prev?.type === "ident" && (prev.value === "function" || prev.value === "new" || prev.value === "return")) ||
       (prev?.type === "punct" && prev.value === "*" && prev2?.type === "ident" && prev2.value === "function") ||
       (prev?.type === "punct" && prev.value === ">" && prev2?.type === "punct" && prev2.value === "=");
-    const isTestRunnerIdent = tok.type === "ident" && (tok.value === "test" || tok.value === "it");
-    if (isTestRunnerIdent && !tok.isMemberProp && tok.depth === 0 && !isExcludedLead) {
-      if (next?.type === "punct" && next.value === "(") {
-        count += 1;
-      } else if (
-        next?.type === "punct" &&
-        next.value === "?" &&
-        tokens[i + 2]?.type === "punct" &&
-        tokens[i + 2].value === "." &&
-        tokens[i + 3]?.type === "punct" &&
-        tokens[i + 3].value === "("
-      ) {
-        count += 1;
-      } else if (
-        next?.type === "punct" &&
-        next.value === "." &&
-        tokens[i + 2]?.type === "ident" &&
-        TEST_SUBMETHODS.has(tokens[i + 2].value) &&
-        ((tokens[i + 3]?.type === "punct" && tokens[i + 3].value === "(") ||
-          (tokens[i + 3]?.type === "punct" &&
-            tokens[i + 3].value === "?" &&
-            tokens[i + 4]?.type === "punct" &&
-            tokens[i + 4].value === "." &&
-            tokens[i + 5]?.type === "punct" &&
-            tokens[i + 5].value === "("))
-      ) {
+    if (isExcludedLead) continue;
+
+    if (tok.value === "describe" || tok.value === "suite") {
+      const openParenIdx = isCallStartAfter(i, SUITE_SUBMETHODS);
+      if (openParenIdx !== -1) {
+        markSuiteCallbackBrace(openParenIdx);
+      }
+      continue;
+    }
+
+    if (tok.value === "test" || tok.value === "it") {
+      const openParenIdx = isCallStartAfter(i, TEST_SUBMETHODS);
+      if (openParenIdx !== -1) {
         count += 1;
       }
     }

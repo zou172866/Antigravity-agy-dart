@@ -86,6 +86,17 @@ function firstNonNeg(...vals) {
   return null;
 }
 
+function firstPosOrNonNeg(...vals) {
+  let zeroCandidate = null;
+  for (const v of vals) {
+    const n = toNonNegNum(v);
+    if (n === null) continue;
+    if (n > 0) return n;
+    if (zeroCandidate === null) zeroCandidate = n;
+  }
+  return zeroCandidate;
+}
+
 function parsePositiveTokenLimit(val) {
   const n = toNonNegNum(val);
   return n !== null && n >= 1024 ? Math.round(n) : null;
@@ -135,8 +146,13 @@ export function extractStepTokenUsage(step) {
     (step.usage_metadata && typeof step.usage_metadata === "object" ? step.usage_metadata : null) ||
     {};
 
+  const hasOpenAiResponsesDetails =
+    usage.input_tokens_details !== null &&
+    typeof usage.input_tokens_details === "object" &&
+    toNonNegNum(usage.input_tokens_details.cached_tokens) !== null;
+
   const cacheReadTokens =
-    firstNonNeg(
+    firstPosOrNonNeg(
       step.cache_read_tokens,
       step.cache_read_input_tokens,
       usage.cache_read_tokens,
@@ -144,17 +160,18 @@ export function extractStepTokenUsage(step) {
       usage.cachedContentTokenCount,
       usage.cached_content_token_count,
       usage.prompt_tokens_details?.cached_tokens,
+      usage.input_tokens_details?.cached_tokens,
       usage.prompt_cache_hit_tokens
     ) ?? 0;
 
   const cacheCreation1hTokens =
-    firstNonNeg(
+    firstPosOrNonNeg(
       step.cache_creation_1h_tokens,
       usage.cache_creation?.ephemeral_1h_input_tokens
     ) ?? 0;
   const cacheCreation5mTokens =
-    firstNonNeg(usage.cache_creation?.ephemeral_5m_input_tokens) ?? 0;
-  const rawCacheCreate = firstNonNeg(
+    firstPosOrNonNeg(usage.cache_creation?.ephemeral_5m_input_tokens) ?? 0;
+  const rawCacheCreate = firstPosOrNonNeg(
     step.cache_creation_tokens,
     step.cache_creation_input_tokens,
     usage.cache_creation_tokens,
@@ -164,12 +181,16 @@ export function extractStepTokenUsage(step) {
     rawCacheCreate !== null ? rawCacheCreate : cacheCreation5mTokens + cacheCreation1hTokens;
 
   // Disjoint uncached input tokens (Antigravity top-level or Anthropic usage.input_tokens)
-  const disjointIn = firstNonNeg(step.input_tokens, usage.input_tokens);
-  // Inclusive total prompt tokens (OpenAI prompt_tokens or Gemini promptTokenCount)
-  const inclusivePrompt = firstNonNeg(
+  // Note: OpenAI Responses API usage.input_tokens is INCLUSIVE of input_tokens_details.cached_tokens
+  const disjointIn = hasOpenAiResponsesDetails
+    ? firstPosOrNonNeg(step.input_tokens)
+    : firstPosOrNonNeg(step.input_tokens, usage.input_tokens);
+  // Inclusive total prompt tokens (OpenAI prompt_tokens / Responses usage.input_tokens / Gemini promptTokenCount)
+  const inclusivePrompt = firstPosOrNonNeg(
     step.prompt_tokens,
     step.promptTokenCount,
     usage.prompt_tokens,
+    hasOpenAiResponsesDetails ? usage.input_tokens : null,
     usage.promptTokenCount,
     usage.prompt_token_count
   );
@@ -182,7 +203,7 @@ export function extractStepTokenUsage(step) {
   }
 
   const outputTokens =
-    firstNonNeg(
+    firstPosOrNonNeg(
       step.output_tokens,
       usage.output_tokens,
       usage.completion_tokens,
@@ -191,7 +212,7 @@ export function extractStepTokenUsage(step) {
     ) ?? 0;
 
   const thinkingTokens =
-    firstNonNeg(
+    firstPosOrNonNeg(
       step.thinking_tokens,
       step.reasoning_tokens,
       usage.thinking_tokens,
@@ -292,7 +313,11 @@ export function readTranscriptTail(filePath, maxBytes = 131072) {
         }
       }
       const steps = parseTranscriptLines(text);
-      if (steps.length > 0 || offset === 0 || windowBytes >= HARD_CAP_BYTES) {
+      const hasUsageStep = steps.some((s) => {
+        const u = extractStepTokenUsage(s);
+        return u.contextTokens > 0 || u.outputTokens > 0;
+      });
+      if (hasUsageStep || offset === 0 || windowBytes >= HARD_CAP_BYTES) {
         return steps;
       }
       windowBytes = Math.min(stat.size, Math.min(HARD_CAP_BYTES, windowBytes * 4));
@@ -1068,6 +1093,14 @@ export function analyzeTranscriptCache(steps, options = {}) {
     const turnEditedFiles = [];
     let turnRanCheck = false;
     const callBareTools = [];
+    const resultByCallId = new Map();
+    const bareToolByCallId = new Map();
+    for (const r of followingResults) {
+      const rid = r?.tool_call_id ?? r?.call_id ?? r?.toolCallId ?? null;
+      if (rid !== null && rid !== undefined && String(rid).trim() !== "") {
+        resultByCallId.set(String(rid), r);
+      }
+    }
 
     // Track duplicate read_file / view_file calls, edit invalidations, loop fingerprints & edit<->fail oscillations
     if (Array.isArray(step.tool_calls)) {
@@ -1123,10 +1156,12 @@ export function analyzeTranscriptCache(steps, options = {}) {
         };
         pendingToolCalls.push(callMeta);
         const callId = call?.id ?? call?.tool_call_id ?? call?.call_id ?? null;
-        if (callId !== null && callId !== undefined && String(callId).trim() !== "") {
-          pendingCallsById.set(String(callId), callMeta);
+        const callIdKey = callId !== null && callId !== undefined && String(callId).trim() !== "" ? String(callId) : null;
+        if (callIdKey) {
+          pendingCallsById.set(callIdKey, callMeta);
+          bareToolByCallId.set(callIdKey, desc.bareTool);
         }
-        const matchedResult = followingResults[callIdx];
+        const matchedResult = (callIdKey && resultByCallId.get(callIdKey)) || followingResults[callIdx];
         const callFailed = matchedResult ? isStepFailureResult(matchedResult, desc.bareTool) : false;
         const resultBytes =
           matchedResult && typeof matchedResult.content === "string"
@@ -1220,7 +1255,12 @@ export function analyzeTranscriptCache(steps, options = {}) {
     }
 
     // Update edit<->fail oscillation state from this turn's calls + following result steps
-    const turnFailed = followingResults.some((r, rIdx) => isStepFailureResult(r, callBareTools[rIdx] || ""));
+    const turnFailed = followingResults.some((r, rIdx) => {
+      const rid = r?.tool_call_id ?? r?.call_id ?? r?.toolCallId ?? null;
+      const bareTool =
+        (rid !== null && rid !== undefined && bareToolByCallId.get(String(rid))) || callBareTools[rIdx] || "";
+      return isStepFailureResult(r, bareTool);
+    });
     if (turnEditedFiles.length > 0 && turnFailed) {
       editFailOscillations += 1;
       for (const f of turnEditedFiles) {
@@ -1392,6 +1432,7 @@ export function analyzeTranscriptCache(steps, options = {}) {
 
           recentBusts.push({
             stepIndex: step.step_index ?? i,
+            hasExplicitStepIndex: step.step_index !== undefined && step.step_index !== null,
             at: step.created_at || null,
             cause,
             prevCtxTokens,
@@ -1616,6 +1657,7 @@ export function analyzeTranscriptCache(steps, options = {}) {
   return {
     turnsWithUsage,
     warmTurns,
+    cacheableTurns: hitRateCount,
     cachedTokensTotal,
     uncachedInputTokensTotal,
     cacheCreationTokensTotal,
@@ -1750,8 +1792,11 @@ export function analyzeMultipleSessionsCache(sessions, options = {}) {
     if (res.peakContextTokens > peakContextTokens) peakContextTokens = res.peakContextTokens;
     duplicateReadCount += res.duplicateReadCount;
     multimodalHighCtxTurns += res.multimodalHighCtxTurns;
-    hitRateWeightedSum += res.avgTurnHitRate * res.turnsWithUsage;
-    hitRateTurnWeight += res.turnsWithUsage;
+    const hitWeight = Number.isFinite(res.cacheableTurns) ? res.cacheableTurns : res.turnsWithUsage;
+    if (hitWeight > 0) {
+      hitRateWeightedSum += res.avgTurnHitRate * hitWeight;
+      hitRateTurnWeight += hitWeight;
+    }
     const sessTokens =
       res.cachedTokensTotal + res.uncachedInputTokensTotal + (res.cacheCreationTokensTotal || 0);
     discountWeightedSum += (res.cacheDiscountRate ?? DEFAULT_CACHE_DISCOUNT_RATE) * sessTokens;
@@ -1932,7 +1977,7 @@ export function findTranscriptForConversation(conversationId = null, optionsOrEx
           process.platform === "win32" ? resolvedRoot.toLowerCase() : resolvedRoot,
           process.platform === "win32" ? resolvedCand.toLowerCase() : resolvedCand
         );
-        if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+        if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../") || path.isAbsolute(rel)) continue;
         if (!fs.existsSync(resolvedCand)) continue;
         try {
           if (realRoot === null) realRoot = fs.realpathSync(resolvedRoot);
@@ -1941,7 +1986,7 @@ export function findTranscriptForConversation(conversationId = null, optionsOrEx
             process.platform === "win32" ? realRoot.toLowerCase() : realRoot,
             process.platform === "win32" ? realCand.toLowerCase() : realCand
           );
-          if (realRel && !realRel.startsWith("..") && !path.isAbsolute(realRel) && fs.statSync(realCand).isFile()) {
+          if (realRel && realRel !== ".." && !realRel.startsWith(`..${path.sep}`) && !realRel.startsWith("../") && !path.isAbsolute(realRel) && fs.statSync(realCand).isFile()) {
             return realCand;
           }
         } catch {

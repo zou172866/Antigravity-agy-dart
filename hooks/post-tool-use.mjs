@@ -16,18 +16,26 @@ function readStdin(timeoutMs = 1500) {
   return new Promise((resolve) => {
     let data = "";
     let settled = false;
+    const onData = (chunk) => {
+      data += chunk;
+    };
     const done = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", done);
+      process.stdin.off("error", done);
+      try {
+        process.stdin.pause();
+        process.stdin.unref?.();
+      } catch {}
       resolve(data);
     };
     const timer = setTimeout(done, timeoutMs);
     timer.unref();
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
+    process.stdin.on("data", onData);
     process.stdin.on("end", done);
     process.stdin.on("error", done);
   });
@@ -67,12 +75,22 @@ function cleanPath(val) {
   while ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
     p = p.slice(1, -1).trim();
   }
-  if (p.startsWith("file:///")) p = p.slice(8);
-  else if (p.startsWith("file://")) p = p.slice(7);
-  try {
-    p = decodeURIComponent(p);
-  } catch {}
-  return p.replace(/#L\d+(-L\d+)?$/i, "").trim();
+  p = p.replace(/#L\d+(-L\d+)?$/i, "");
+  if (/^file:\/\//i.test(p)) {
+    try {
+      p = fileURLToPath(p);
+    } catch {
+      let rest = p.replace(/^file:\/\//i, "");
+      try {
+        rest = decodeURIComponent(rest);
+      } catch {}
+      if (/^\/[A-Za-z]:[\\/]/.test(rest)) {
+        rest = rest.slice(1);
+      }
+      p = rest;
+    }
+  }
+  return p.trim();
 }
 
 function parseMaybeJson(val) {
@@ -328,10 +346,12 @@ async function main() {
         }
       } else if (paths.length > 0) {
         const partialApplied = extractPartialAppliedPaths(responseText, toolName, args, cwd);
+        const explicitlyApplied = /^\s*Applied edits to \d+ file\(s\):/im.test(responseText);
         const abortedNoWrite =
           partialApplied === null &&
+          !explicitlyApplied &&
           (responseIsError ||
-            /(?:Atomic edit aborted|Edit aborted|Validation failed)\s*\(0 files modified\)|Write failed \(changes rolled back\)|Dry run validated|Encountered error in step execution|Tool error \(/i.test(
+            /^\s*(?:(?:Atomic edit aborted|Edit aborted|Validation failed)\s*\(0 files modified\)|Write failed \(changes rolled back\)|Dry run validated|Encountered error in step execution|Tool error \()/i.test(
               responseText
             ));
         const effectivePaths = partialApplied !== null ? partialApplied : abortedNoWrite ? [] : paths;

@@ -56,6 +56,96 @@ function expandHomePrefix(dirPath) {
   return dirPath;
 }
 
+function decodeUtf8TrimIncomplete(chunks, trimTrailingIncomplete = false) {
+  let buf = Buffer.concat(chunks);
+  if (trimTrailingIncomplete && buf.length > 0) {
+    let start = buf.length - 1;
+    while (start > 0 && (buf[start] & 0xc0) === 0x80) {
+      start -= 1;
+    }
+    const lead = buf[start];
+    let expectedLen = 1;
+    if ((lead & 0xe0) === 0xc0) expectedLen = 2;
+    else if ((lead & 0xf0) === 0xe0) expectedLen = 3;
+    else if ((lead & 0xf8) === 0xf0) expectedLen = 4;
+    if (buf.length - start < expectedLen) {
+      buf = buf.subarray(0, start);
+    }
+  }
+  return buf.toString("utf8");
+}
+
+function resolveWindowsExeOnPath(cmdName, cwd) {
+  if (!cmdName || /[\r\n\0]/.test(cmdName)) return null;
+  const hasSep = cmdName.includes("/") || cmdName.includes("\\");
+  const hasExe = /\.exe$/i.test(cmdName);
+  const tryFile = (p) => {
+    try {
+      return fs.existsSync(p) && fs.statSync(p).isFile() ? p : null;
+    } catch {
+      return null;
+    }
+  };
+  if (hasSep) {
+    const resolved = path.resolve(cwd, cmdName);
+    return hasExe ? tryFile(resolved) : tryFile(`${resolved}.exe`);
+  }
+  const pathEnv = process.env.PATH || process.env.Path || "";
+  const candidateName = hasExe ? cmdName : `${cmdName}.exe`;
+  for (const dir of pathEnv.split(";")) {
+    const cleanDir = dir.trim().replace(/^"|"$/g, "");
+    if (!cleanDir) continue;
+    const hit = tryFile(path.join(cleanDir, candidateName));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function tryParseSimpleCommand(cmd) {
+  if (!cmd || typeof cmd !== "string") return null;
+  const tokens = [];
+  let i = 0;
+  const len = cmd.length;
+  while (i < len) {
+    while (i < len && /\s/.test(cmd[i])) i++;
+    if (i >= len) break;
+    let tok = "";
+    let hasContent = false;
+    while (i < len && !/\s/.test(cmd[i])) {
+      const ch = cmd[i];
+      if (ch === "'" || ch === '"') {
+        hasContent = true;
+        const q = ch;
+        i++;
+        let closed = false;
+        while (i < len) {
+          if (q === '"' && cmd[i] === "\\" && i + 1 < len && (cmd[i + 1] === '"' || cmd[i + 1] === "\\")) {
+            tok += cmd[i + 1];
+            i += 2;
+            continue;
+          }
+          if (cmd[i] === q) {
+            i++;
+            closed = true;
+            break;
+          }
+          tok += cmd[i];
+          i++;
+        }
+        if (!closed) return null;
+      } else {
+        if (/[|;&<>`$()%!{}#\r\n\0]/.test(ch)) return null;
+        tok += ch;
+        hasContent = true;
+        i++;
+      }
+    }
+    if (hasContent) tokens.push(tok);
+  }
+  if (tokens.length === 0) return null;
+  return { bin: tokens[0], args: tokens.slice(1) };
+}
+
 function runCommandCaptured(command, unwrapFn = null) {
   return new Promise((resolve) => {
     const parts = typeof unwrapFn === "function" ? unwrapFn(command) : null;
@@ -94,42 +184,71 @@ function runCommandCaptured(command, unwrapFn = null) {
       }
     }
 
-    // On Windows, cmd.exe strips '^' (e.g. git diff HEAD^), expands '%...%', and misparses single quotes.
-    // Route those commands through PowerShell (preserving exact $LASTEXITCODE) while keeping fast cmd.exe
-    // for plain cross-shell CLIs. Since safe leading `cd ... &&` is already resolved via execCwd, PowerShell
-    // never trips on Windows PowerShell 5.1's lack of `&&` support.
+    // On Windows, prefer direct shell:false spawn for resolved native .exe binaries when single-command
+    // syntax contains quotes/`^` (avoids cmd.exe `^` stripping, PS 5.1 embedded `"` loss inside `'...'`,
+    // PS alias hijacking of curl/diff/ls/sort, and PS OEM encoding). For .ps1/.cmd shims (npm/npx/vitest),
+    // pass -ExecutionPolicy Bypass and force UTF-8 console encoding.
     const usePowerShell = process.platform === "win32" && /['^%]/.test(execCmd) && !/&&/.test(execCmd);
-    const psCommand = usePowerShell
-      ? `${execCmd}\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nif (-not $?) { exit 1 }\nexit 0`
-      : null;
+    let directWinExe = null;
+    let directWinArgs = null;
+    if (process.platform === "win32" && usePowerShell) {
+      const parsedSimple = tryParseSimpleCommand(execCmd);
+      if (parsedSimple) {
+        const exePath = resolveWindowsExeOnPath(parsedSimple.bin, execCwd);
+        if (exePath) {
+          directWinExe = exePath;
+          directWinArgs = parsedSimple.args;
+        }
+      }
+    }
 
-    const child = usePowerShell
-      ? spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCommand], {
+    const psCommand =
+      usePowerShell && !directWinExe
+        ? `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::InputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8\n${execCmd}\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nif (-not $?) { exit 1 }\nexit 0`
+        : null;
+
+    const child = directWinExe
+      ? spawn(directWinExe, directWinArgs, {
+          shell: false,
           cwd: execCwd,
           env: process.env,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"]
         })
-      : spawn(execCmd, {
-          shell: true,
-          cwd: execCwd,
-          env: process.env,
-          windowsHide: true,
-          stdio: ["ignore", "pipe", "pipe"]
-        });
+      : usePowerShell
+        ? spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psCommand], {
+            cwd: execCwd,
+            env: process.env,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"]
+          })
+        : spawn(execCmd, {
+            shell: true,
+            cwd: execCwd,
+            env: process.env,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"]
+          });
 
     const outChunks = [];
     const errChunks = [];
     let outLen = 0;
     let errLen = 0;
+    let outTruncated = false;
+    let errTruncated = false;
     let truncatedCapture = false;
 
     const appendOut = (chunk) => {
       if (outLen < MAX_CAPTURE_BYTES) {
         const take = Math.min(chunk.length, MAX_CAPTURE_BYTES - outLen);
+        if (take < chunk.length) {
+          outTruncated = true;
+          truncatedCapture = true;
+        }
         outChunks.push(take === chunk.length ? chunk : chunk.subarray(0, take));
         outLen += take;
       } else {
+        outTruncated = true;
         truncatedCapture = true;
       }
     };
@@ -142,10 +261,15 @@ function runCommandCaptured(command, unwrapFn = null) {
       }
       if (errLen < MAX_CAPTURE_BYTES) {
         const take = Math.min(chunk.length, MAX_CAPTURE_BYTES - errLen);
+        if (take < chunk.length) {
+          errTruncated = true;
+          if (!mergeStderrToStdout) truncatedCapture = true;
+        }
         errChunks.push(take === chunk.length ? chunk : chunk.subarray(0, take));
         errLen += take;
-      } else if (!mergeStderrToStdout) {
-        truncatedCapture = true;
+      } else {
+        errTruncated = true;
+        if (!mergeStderrToStdout) truncatedCapture = true;
       }
     });
 
@@ -173,9 +297,9 @@ function runCommandCaptured(command, unwrapFn = null) {
     child.on("close", (code, signal) => {
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
-      const stderrText = Buffer.concat(errChunks).toString("utf8");
+      const stderrText = decodeUtf8TrimIncomplete(errChunks, errTruncated);
       resolve({
-        stdout: Buffer.concat(outChunks).toString("utf8"),
+        stdout: decodeUtf8TrimIncomplete(outChunks, outTruncated),
         stderr: mergeStderrToStdout ? "" : stderrText,
         capturedStderr: mergeStderrToStdout ? stderrText : "",
         exitCode: code !== null && code !== undefined ? code : signal ? 1 : 0,

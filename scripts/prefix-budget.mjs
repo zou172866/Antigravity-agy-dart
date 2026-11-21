@@ -547,6 +547,7 @@ function fetchMcpTools(scriptPath, extraEnv = {}, baseEnv = process.env) {
       windowsHide: true,
       env: { ...baseEnv, ...extraEnv }
     });
+    child.stdin.on("error", () => {});
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -567,22 +568,26 @@ function fetchMcpTools(scriptPath, extraEnv = {}, baseEnv = process.env) {
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter(Boolean);
-      if (lines.length < 2) {
-        return reject(new Error(`Incomplete MCP response (exit ${code}): ${stderr || stdout}`));
+      let matchedLine = null;
+      let listResp = null;
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.id === 2) {
+            matchedLine = line;
+            listResp = parsed;
+            break;
+          }
+        } catch {}
       }
-      try {
-        const listResp = JSON.parse(lines[1]);
-        const tools = listResp?.result?.tools;
-        if (!Array.isArray(tools)) {
-          return reject(new Error(`Invalid MCP tools/list response from ${scriptPath}`));
-        }
-        resolve({
-          rawLine: lines[1],
-          tools
-        });
-      } catch (err) {
-        reject(err);
+      const tools = listResp?.result?.tools;
+      if (!matchedLine || !Array.isArray(tools)) {
+        return reject(new Error(`Incomplete or invalid MCP tools/list response (exit ${code}): ${stderr || stdout}`));
       }
+      resolve({
+        rawLine: matchedLine,
+        tools
+      });
     });
 
     child.stdin.write(

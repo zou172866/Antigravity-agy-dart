@@ -170,15 +170,21 @@ export function cleanStringArg(val) {
 export function cleanFilePath(val) {
   let p = cleanStringArg(val);
   if (!p) return "";
-  if (p.startsWith("file:///")) {
-    p = p.slice(8);
-  } else if (p.startsWith("file://")) {
-    p = p.slice(7);
-  }
-  try {
-    p = decodeURIComponent(p);
-  } catch {}
   p = p.replace(/#L\d+(-L\d+)?$/i, "");
+  if (/^file:\/\//i.test(p)) {
+    try {
+      p = fileURLToPath(p);
+    } catch {
+      let rest = p.replace(/^file:\/\//i, "");
+      try {
+        rest = decodeURIComponent(rest);
+      } catch {}
+      if (/^\/[A-Za-z]:[\\/]/.test(rest)) {
+        rest = rest.slice(1);
+      }
+      p = rest;
+    }
+  }
   return path.normalize(p.trim());
 }
 
@@ -531,15 +537,98 @@ export function buildCliFilterRewrite(commandLine, sessionId = "default", cwd = 
   };
 }
 
-function readStdin() {
+function readStdin(timeoutMs = 1500) {
   return new Promise((resolve) => {
     let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
+    let settled = false;
+    const onData = (chunk) => {
       data += chunk;
-    });
-    process.stdin.on("end", () => resolve(data));
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", done);
+      process.stdin.off("error", done);
+      try {
+        process.stdin.pause();
+        process.stdin.unref?.();
+      } catch {}
+      resolve(data);
+    };
+    const timer = setTimeout(done, timeoutMs);
+    timer.unref();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", onData);
+    process.stdin.on("end", done);
+    process.stdin.on("error", done);
   });
+}
+
+function extractFileDumpTargets(cmdAfterVerb) {
+  const targets = [];
+  const psValueFlags = new Set([
+    "-encoding",
+    "-delimiter",
+    "-readcount",
+    "-filter",
+    "-include",
+    "-exclude",
+    "-stream",
+    "-credential"
+  ]);
+  let i = 0;
+  const len = cmdAfterVerb.length;
+  let afterDoubleDash = false;
+  let skipNextValue = false;
+  while (i < len) {
+    while (i < len && /\s/.test(cmdAfterVerb[i])) i++;
+    if (i >= len || /[;|&]/.test(cmdAfterVerb[i])) break;
+    let tok = "";
+    let wasQuoted = false;
+    while (i < len && !/\s/.test(cmdAfterVerb[i])) {
+      const ch = cmdAfterVerb[i];
+      if (/[;|&]/.test(ch)) break;
+      if (ch === '"' || ch === "'") {
+        wasQuoted = true;
+        const q = ch;
+        i++;
+        while (i < len && cmdAfterVerb[i] !== q) {
+          tok += cmdAfterVerb[i];
+          i++;
+        }
+        if (i < len && cmdAfterVerb[i] === q) i++;
+      } else {
+        tok += ch;
+        i++;
+      }
+    }
+    if (!tok) continue;
+    if (skipNextValue) {
+      skipNextValue = false;
+      continue;
+    }
+    if (!afterDoubleDash && !wasQuoted) {
+      if (tok === "--") {
+        afterDoubleDash = true;
+        continue;
+      }
+      if (tok.startsWith("-")) {
+        const lowerTok = tok.toLowerCase();
+        if (lowerTok === "-path" || lowerTok === "-literalpath") {
+          continue;
+        }
+        if (psValueFlags.has(lowerTok)) {
+          skipNextValue = true;
+          continue;
+        }
+        continue;
+      }
+    }
+    targets.push(tok);
+  }
+  return targets;
 }
 
 export function inspectCommand({ commandLine, cwd, sessionId }) {
@@ -574,11 +663,23 @@ export function inspectCommand({ commandLine, cwd, sessionId }) {
     }
   }
 
-  // 2. Direct curl / wget to stdout (ignore `2>&1` stderr-to-stdout merge which does NOT redirect to a file)
-  const cmdNoStderrMerge = cleanCmd.replace(/(?:^|\s)2>&1(?=\s|$)/g, " ");
-  if (/^\s*(curl(\.exe)?|wget(\.exe)?)\b/i.test(cleanCmd)) {
-    const writesToFile = /(-o\s+|-O\s+|--output\s+|>)/i.test(cmdNoStderrMerge);
-    const hasLimiter = /\|\s*(head|Select-Object|select|more)/i.test(cmdNoStderrMerge);
+  // Strip ALL stderr redirections (2>&1, 2>/dev/null, 2>NUL, 2>>err.log) before inspecting stdout redirects
+  const cmdNoStderrRedir = cleanCmd.replace(
+    /(?:^|\s)2>>?\s*(?:&\d+|"[^"]*"|'[^']*'|[^\s;|&]+)(?=\s|$|[;|&])/g,
+    " "
+  );
+
+  // 2. Direct curl / wget to stdout
+  const fetchMatch = cleanCmd.match(/^\s*(curl|wget)(?:\.exe)?\b/i);
+  if (fetchMatch) {
+    const isCurl = fetchMatch[1].toLowerCase() === "curl";
+    const writesToFile =
+      />\s*[^>]/i.test(cmdNoStderrRedir) ||
+      /(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+)(?!["']?-(?:["']?)(?:\s|$|[;|&]))(?:"[^"]+"|'[^']+'|\S+)/.test(
+        cmdNoStderrRedir
+      ) ||
+      (isCurl && /(?:^|\s)(?:-O|--remote-name)(?=\s|$|[;|&])/.test(cmdNoStderrRedir));
+    const hasLimiter = /\|\s*(head|Select-Object|select|more)/i.test(cmdNoStderrRedir);
     if (!writesToFile && !hasLimiter) {
       const urlMatch = cleanCmd.match(/https?:\/\/[^\s"']+/i);
       if (urlMatch) {
@@ -601,62 +702,73 @@ export function inspectCommand({ commandLine, cwd, sessionId }) {
     }
   }
 
-  // 3. Raw file dump utilities (cat, type, Get-Content, gc)
-  const printMatch = cmdNoStderrMerge.match(/^\s*(cat|type|Get-Content|gc)(\.exe)?\b/i);
+  // 3. Raw file dump utilities (cat, Get-Content, gc; Windows-only `type`)
+  const printMatch = cmdNoStderrRedir.match(/^\s*(cat|type|Get-Content|gc)(?:\.exe)?\b/i);
   if (printMatch) {
+    const verb = printMatch[1].toLowerCase();
+    if (verb === "type" && process.platform !== "win32") {
+      return { shouldDeny: false };
+    }
+
     const hasLimiter =
-      /(-Head|-TotalCount|-First|-Tail)\s+\d+/i.test(cmdNoStderrMerge) ||
-      /\|\s*(head|Select-Object|select\s+(-[a-zA-Z]+\s+)*-First|more|Out-Null|Set-Content|Out-File)/i.test(cmdNoStderrMerge) ||
-      />\s*[^>]/i.test(cmdNoStderrMerge);
+      /(-Head|-TotalCount|-First|-Tail)\s+\d+/i.test(cmdNoStderrRedir) ||
+      /\|\s*(head|Select-Object|select\s+(-[a-zA-Z]+\s+)*-First|more|Out-Null|Set-Content|Out-File)/i.test(cmdNoStderrRedir) ||
+      />\s*[^>]/i.test(cmdNoStderrRedir);
 
     if (hasLimiter) return { shouldDeny: false };
 
-    const argMatch = cmdNoStderrMerge.match(/(?:cat|type|Get-Content|gc)(?:\.exe)?(?:\s+(?:-Path|-LiteralPath))?\s+["']?([^"'\r\n;|]+)["']?/i);
-    const rawTarget = argMatch && argMatch[1] ? argMatch[1].trim() : "";
+    const restAfterVerb = cmdNoStderrRedir.slice(printMatch[0].length);
+    const rawTargets = extractFileDumpTargets(restAfterVerb);
 
-    if (rawTarget.includes("*") || rawTarget.includes("?")) {
-      return {
-        shouldDeny: true,
-        reason:
-          `[agy-dart protection] Wildcard file dump ('${rawTarget}') risks flooding the context window. ` +
-          `Use call_mcp_tool(ServerName:"${CTX_SERVER}", ToolName:"ctx_execute") or append '| Select-Object -First 50'.`,
-        size: 32768,
-        targetPath: rawTarget
-      };
-    }
+    let cumulativeNonExemptBytes = 0;
+    for (const rawTarget of rawTargets) {
+      if (rawTarget.includes("*") || rawTarget.includes("?")) {
+        return {
+          shouldDeny: true,
+          reason:
+            `[agy-dart protection] Wildcard file dump ('${rawTarget}') risks flooding the context window. ` +
+            `Use call_mcp_tool(ServerName:"${CTX_SERVER}", ToolName:"ctx_execute") or append '| Select-Object -First 50'.`,
+          size: 32768,
+          targetPath: rawTarget
+        };
+      }
 
-    if (rawTarget) {
       const cleanTarget = cleanFilePath(rawTarget);
       const absPath = path.isAbsolute(cleanTarget) ? cleanTarget : path.resolve(cwd, cleanTarget);
+      let checked = false;
       try {
         if (fs.existsSync(absPath)) {
-          if (isAgentInstructionFile(rawTarget, absPath)) return { shouldDeny: false };
+          checked = true;
+          if (isAgentInstructionFile(rawTarget, absPath)) continue;
           const ext = path.extname(absPath).toLowerCase();
-          if (ext && exemptExtensions.includes(ext)) return { shouldDeny: false };
+          if (ext && exemptExtensions.includes(ext)) continue;
           const stat = fs.statSync(absPath);
-          if (maxReadBytes > 0 && stat.size > maxReadBytes) {
+          cumulativeNonExemptBytes += stat.size;
+          if (maxReadBytes > 0 && (stat.size > maxReadBytes || cumulativeNonExemptBytes > maxReadBytes)) {
+            const reportSize = Math.max(stat.size, cumulativeNonExemptBytes);
             return {
               shouldDeny: true,
               reason:
-                `[agy-dart protection] Command attempts an un-paged dump of '${cleanTarget}' (${formatBytes(stat.size)}), ` +
+                `[agy-dart protection] Command attempts an un-paged dump of '${cleanTarget}' (${formatBytes(reportSize)}), ` +
                 `exceeding the ${formatBytes(maxReadBytes)} context limit. ` +
                 `Use call_mcp_tool(ServerName:"${CTX_SERVER}", ToolName:"ctx_execute") or append '| Select-Object -First 50' / '-Head 50'.`,
-              size: stat.size,
+              size: reportSize,
               targetPath: cleanTarget
             };
           }
-          return { shouldDeny: false };
         }
       } catch {}
 
-      return {
-        shouldDeny: true,
-        reason:
-          `[agy-dart protection] Command matches an un-paged file dump ('${rawTarget}') that could flood the context window. ` +
-          `Use call_mcp_tool(ServerName:"${CTX_SERVER}", ToolName:"ctx_execute") or append '| Select-Object -First 50' / '| head -n 50'.`,
-        size: 32768,
-        targetPath: cleanTarget || rawTarget
-      };
+      if (!checked) {
+        return {
+          shouldDeny: true,
+          reason:
+            `[agy-dart protection] Command matches an un-paged file dump ('${rawTarget}') that could flood the context window. ` +
+            `Use call_mcp_tool(ServerName:"${CTX_SERVER}", ToolName:"ctx_execute") or append '| Select-Object -First 50' / '| head -n 50'.`,
+          size: 32768,
+          targetPath: cleanTarget || rawTarget
+        };
+      }
     }
   }
 
@@ -733,8 +845,10 @@ async function main() {
   // 1. Guard read_file / view_file (unless disabled via env for ultra-low-latency mode B)
   if (preParsedRead) {
     const { filePath, absPath, ext } = preParsedRead;
-    const startLine = parseLineArg(args.StartLine ?? args.startLine ?? args.start_line) ?? 1;
-    const endLine = parseLineArg(args.EndLine ?? args.endLine ?? args.end_line);
+    const rawStartLine = parseLineArg(args.StartLine ?? args.startLine ?? args.start_line);
+    const startLine = rawStartLine !== null && rawStartLine >= 1 ? rawStartLine : 1;
+    const rawEndLine = parseLineArg(args.EndLine ?? args.endLine ?? args.end_line);
+    const endLine = rawEndLine !== null && rawEndLine > 0 ? rawEndLine : null;
     const maxReadBytes = getMaxReadBytes(sessionId);
     const maxLineRange = getMaxLineRange(maxReadBytes);
 
@@ -757,7 +871,14 @@ async function main() {
           const sec = await ensureSecurityModule();
           const guardMode = sec.getSensitiveFileGuardMode();
           if (guardMode === "warn" || guardMode === "deny") {
-            const sens = sec.detectSensitiveFile(absPath);
+            let realAbsPath = absPath;
+            try {
+              realAbsPath = fs.realpathSync(absPath);
+            } catch {}
+            const sensDirect = sec.detectSensitiveFile(absPath);
+            const sensReal =
+              realAbsPath !== absPath ? sec.detectSensitiveFile(realAbsPath) : { sensitive: false, reason: null };
+            const sens = sensDirect.sensitive ? sensDirect : sensReal;
             if (sens.sensitive) {
               const normKey = process.platform === "win32" ? absPath.toLowerCase() : absPath;
               const confirmKey = `sensitive_read_confirm:${sessionId}:${normKey}`;
@@ -933,13 +1054,15 @@ async function main() {
               };
 
               // State 3 (Modified file previously snapshotted in the SAME direct conversation within recent N turns & age)
+              // Omit `ino` filter here so atomic-rename edits (apply_edits, git checkout, prettier) still hit the baseline;
+              // MAX_DIFF_READ_RATIO (0.4) already guards against unrelated file replacement.
               if (!dup && diffReadEnabled) {
                 const snapshot = store.findFileSnapshot({
                   sessionId: directConvId,
                   filePath: absPath,
                   startLine,
                   endLine: effectiveEndLine,
-                  ino: stat.ino,
+                  ino: null,
                   maxAgeMs: diffReadMaxAgeMs
                 });
 
@@ -985,7 +1108,7 @@ async function main() {
                         sha256: currentSha256,
                         mtimeMs: stat.mtimeMs,
                         fileSize: stat.size,
-                        ino: stat.ino,
+                        ino: null,
                         content: currentRangeText,
                         bypassArmed: 1,
                         fullReadTs: baselineFullTs || Date.now(),
@@ -1046,7 +1169,7 @@ async function main() {
                   sha256: currentSha256,
                   mtimeMs: stat.mtimeMs,
                   fileSize: stat.size,
-                  ino: stat.ino,
+                  ino: null,
                   content: currentRangeText,
                   bypassArmed: 0,
                   fullReadTs: Date.now(),

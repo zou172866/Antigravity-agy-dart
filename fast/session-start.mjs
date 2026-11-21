@@ -16,17 +16,23 @@ var DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 function killChildTree(pid, detached) {
   if (!pid) return;
   if (process.platform === "win32") {
-    try {
-      const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-      killer.unref();
-    } catch {
+    const fallbackKill = () => {
       try {
         process.kill(pid, "SIGTERM");
       } catch {
       }
+    };
+    try {
+      const sysRoot = process.env.SystemRoot || process.env.WINDIR;
+      const taskkillBin = sysRoot ? path.join(sysRoot, "System32", "taskkill.exe") : "taskkill";
+      const killer = spawn(taskkillBin, ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      killer.on("error", fallbackKill);
+      killer.unref();
+    } catch {
+      fallbackKill();
     }
     return;
   }
@@ -775,6 +781,7 @@ function spawnBackgroundUpdateCheck(pluginDir, env = process.env) {
         env
       }
     );
+    child.on("error", () => {});
     child.unref();
     return true;
   } catch {
@@ -796,17 +803,26 @@ async function readStdin(timeoutMs = 1500) {
   return new Promise((resolve) => {
     const chunks = [];
     let settled = false;
+    const onData = (chunk) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+    };
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", finish);
+      process.stdin.off("error", finish);
+      try {
+        process.stdin.pause();
+        process.stdin.unref?.();
+      } catch {
+      }
       resolve(Buffer.concat(chunks).toString("utf8"));
     };
     const timer = setTimeout(finish, timeoutMs);
     timer.unref();
-    process.stdin.on("data", (chunk) => {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
-    });
+    process.stdin.on("data", onData);
     process.stdin.on("end", finish);
     process.stdin.on("error", finish);
   });

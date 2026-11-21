@@ -25,18 +25,26 @@ function readStdin(timeoutMs = 1500) {
   return new Promise((resolve) => {
     let data = "";
     let settled = false;
+    const onData = (chunk) => {
+      data += chunk;
+    };
     const done = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", done);
+      process.stdin.off("error", done);
+      try {
+        process.stdin.pause();
+        process.stdin.unref?.();
+      } catch {}
       resolve(data);
     };
     const timer = setTimeout(done, timeoutMs);
     timer.unref();
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
+    process.stdin.on("data", onData);
     process.stdin.on("end", done);
     process.stdin.on("error", done);
   });
@@ -205,11 +213,12 @@ async function main() {
   const payload = parseHookPayload(rawInput);
   const workspaceDir = resolveWorkspaceDir(payload);
   const effectiveCfg = getEffectiveConfig();
+  const isSubagent = isSubagentPayload(payload, process.env);
   const stablePrefixOnly =
     effectiveCfg.stablePrefixOnly === true ||
-    (!effectiveCfg.subagentIncludeGit && isSubagentPayload(payload, process.env));
+    (!effectiveCfg.subagentIncludeGit && isSubagent);
 
-  // 1. Reset transient session overrides, run lightweight daily DB TTL cleanup, & fetch git-HEAD-cached repo hubs
+  // 1. Reset transient session overrides (primary sessions only!), run lightweight daily DB TTL cleanup, & fetch repo hubs
   let hotspotsLine = "";
   let store = null;
   try {
@@ -218,8 +227,10 @@ async function main() {
       import("../context/lib/repo-skeleton.js")
     ]);
     store = new ContextModeStore({ hookMode: true });
-    store.clearSessionOverrides();
-    store.maybeRunDailyMaintenance(14);
+    if (!isSubagent) {
+      store.clearSessionOverrides();
+      store.maybeRunDailyMaintenance(14);
+    }
     if (workspaceDir && effectiveCfg.repoHubs) {
       hotspotsLine = getCachedRepoHotspots(workspaceDir, store, { maxFiles: 120, maxHubs: 5 });
     }

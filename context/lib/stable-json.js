@@ -13,20 +13,33 @@ function isPlainObject(value) {
 /**
  * Recursively rebuild plain objects with lexicographically sorted keys while preserving array order.
  */
-export function stableSortObject(value) {
+export function stableSortObject(value, seen = new WeakSet()) {
   if (value === null || typeof value !== "object") {
     return value;
   }
+  if (seen.has(value)) {
+    return "[Circular]";
+  }
   if (Array.isArray(value)) {
-    return value.map((item) => stableSortObject(item));
+    seen.add(value);
+    const out = value.map((item) => stableSortObject(item, seen));
+    seen.delete(value);
+    return out;
   }
   if (!isPlainObject(value)) {
     return value;
   }
+  seen.add(value);
   const sorted = {};
   for (const key of Object.keys(value).sort(compareAsciiKeys)) {
-    sorted[key] = stableSortObject(value[key]);
+    Object.defineProperty(sorted, key, {
+      value: stableSortObject(value[key], seen),
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
   }
+  seen.delete(value);
   return sorted;
 }
 

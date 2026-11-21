@@ -59,9 +59,21 @@ function formatTokensK(tokens) {
   return `${Math.round(n / 1000)}k`;
 }
 
-function formatUsdCompact(val) {
+function toFiniteNumber(val) {
+  if (val === null || val === undefined || typeof val === "boolean") return null;
+  if (typeof val === "string" && val.trim() === "") return null;
   const n = Number(val);
-  if (!Number.isFinite(n)) return null;
+  return Number.isFinite(n) ? n : null;
+}
+
+function isUncPath(p) {
+  if (!p || typeof p !== "string") return false;
+  return /^[\\/]{2}/.test(p.trim());
+}
+
+function formatUsdCompact(val) {
+  const n = toFiniteNumber(val);
+  if (n === null) return null;
   if (n === 0) return "$0.00";
   const abs = Math.abs(n);
   const sign = n < 0 ? "-" : "";
@@ -91,12 +103,28 @@ function sanitizeInline(val, maxBytes = 240) {
 function isExistingDirectory(dirPath) {
   if (!dirPath || typeof dirPath !== "string") return false;
   const trimmed = dirPath.trim();
-  if (!trimmed || trimmed.includes("\0")) return false;
+  if (!trimmed || trimmed.includes("\0") || isUncPath(trimmed)) return false;
+  const resolved = path.resolve(trimmed);
+  if (isUncPath(resolved)) return false;
   try {
-    return fs.existsSync(trimmed) && fs.statSync(trimmed).isDirectory();
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) return false;
+    const real = fs.realpathSync(resolved);
+    if (isUncPath(real)) return false;
+    return true;
   } catch {
     return false;
   }
+}
+
+function resolveCanonicalPath(p) {
+  const real = typeof fs.realpathSync.native === "function"
+    ? fs.realpathSync.native(p)
+    : fs.realpathSync(p);
+  if (process.platform === "win32") {
+    const driveMatch = real.match(/^\\\\\?\\([a-zA-Z]:\\.*)$/);
+    if (driveMatch) return driveMatch[1];
+  }
+  return real;
 }
 
 function isUnsafeBroadRoot(dirPath) {
@@ -108,18 +136,37 @@ function isUnsafeBroadRoot(dirPath) {
       : resolved === root;
     if (isFsRoot) return true;
   }
+  let realResolved = resolved;
+  try {
+    realResolved = resolveCanonicalPath(resolved);
+    const realRoot = path.parse(realResolved).root;
+    if (realRoot) {
+      const isRealFsRoot = process.platform === "win32"
+        ? realResolved.toLowerCase() === realRoot.toLowerCase()
+        : realResolved === realRoot;
+      if (isRealFsRoot) return true;
+    }
+  } catch {}
   const home = path.resolve(os.homedir());
   let realHome = home;
   try {
-    realHome = fs.realpathSync(home);
+    realHome = resolveCanonicalPath(home);
   } catch {}
   const inside = (cand, anc) => {
     const nc = process.platform === "win32" ? cand.toLowerCase() : cand;
     const na = process.platform === "win32" ? anc.toLowerCase() : anc;
     const rel = path.relative(na, nc);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    return (
+      rel === "" ||
+      (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel))
+    );
   };
-  return inside(home, resolved) || inside(realHome, resolved);
+  return (
+    inside(home, resolved) ||
+    inside(realHome, resolved) ||
+    inside(home, realResolved) ||
+    inside(realHome, realResolved)
+  );
 }
 
 function runGitReadOnly(args, workDir) {
@@ -225,8 +272,8 @@ export function inferWorkspaceFromStore(store, sessionId = "default", sinceTs = 
     if (!store.db) return "";
     const sid = sessionId || "default";
     const isAll = sid === "all" || sid === "lifetime";
-    const isApp = sid === "app" && Number.isFinite(Number(sinceTs));
-    const sinceNum = isApp ? Number(sinceTs) : null;
+    const sinceNum = sid === "app" ? toFiniteNumber(sinceTs) : null;
+    const isApp = sinceNum !== null;
     const sinceIso = isApp ? new Date(sinceNum).toISOString() : null;
 
     const queries = [
@@ -292,7 +339,8 @@ export function inferWorkspaceFromStore(store, sessionId = "default", sinceTs = 
 function formatVerificationLine(label, rec) {
   if (!rec || typeof rec !== "object") return "";
   const status = rec.ok ? "PASS" : "FAIL";
-  const exitPart = Number.isFinite(Number(rec.exitCode)) ? ` (exit ${Number(rec.exitCode)})` : "";
+  const exitNum = toFiniteNumber(rec.exitCode);
+  const exitPart = exitNum !== null ? ` (exit ${exitNum})` : "";
   const cmdPart = rec.command ? ` \`${sanitizeInline(rec.command, 120)}\`` : "";
   const summaryPart = rec.summary ? ` — ${sanitizeInline(rec.summary, 180)}` : "";
   const srcPart = rec.sourceId ? ` [sourceId: \`${sanitizeInline(rec.sourceId, 64)}\`]` : "";
@@ -344,7 +392,8 @@ export function buildHandoffBrief({
   }
   if (store && typeof store.getResumeState === "function") {
     try {
-      const resumeOpts = Number.isFinite(Number(sinceTs)) ? { sinceTs: Number(sinceTs) } : {};
+      const resumeSince = toFiniteNumber(sinceTs);
+      const resumeOpts = resumeSince !== null ? { sinceTs: resumeSince } : {};
       resumeState = store.getResumeState(sid, 5, resumeOpts);
     } catch {
       resumeState = null;
@@ -355,9 +404,8 @@ export function buildHandoffBrief({
   }
 
   const modifiedFiles = Array.isArray(checkpoint?.modifiedFiles) ? checkpoint.modifiedFiles.filter(Boolean) : [];
-  const modifiedFileCount = Number.isFinite(Number(checkpoint?.modifiedFileCount))
-    ? Math.max(modifiedFiles.length, Number(checkpoint.modifiedFileCount))
-    : modifiedFiles.length;
+  const cpModCount = toFiniteNumber(checkpoint?.modifiedFileCount);
+  const modifiedFileCount = cpModCount !== null ? Math.max(modifiedFiles.length, cpModCount) : modifiedFiles.length;
   const lastTest = checkpoint?.lastTest || null;
   const lastBuild = checkpoint?.lastBuild || null;
   const recentSources = Array.isArray(resumeState?.recentSources) ? resumeState.recentSources.slice(0, 5) : [];
@@ -425,7 +473,7 @@ export function buildHandoffBrief({
     const winTok = Number(cacheDiag.modelProfile?.windowTokens || 0);
     const temp = sanitizeInline(cacheDiag.cacheTemperature || "cold", 32);
     const advice = sanitizeInline(cacheDiag.compactAdvice || "none", 48);
-    const hitRate = Number(cacheDiag.weightedHitRate);
+    const hitRate = toFiniteNumber(cacheDiag.weightedHitRate);
     const savedUsd = formatUsdCompact(cacheDiag.estimatedSavedUsd);
 
     const row1 = [];
@@ -440,17 +488,18 @@ export function buildHandoffBrief({
 
     const row2 = [];
     if (temp) row2.push(`**Cache**: ${temp.toUpperCase()}`);
-    if (Number.isFinite(hitRate)) row2.push(`**Hit Rate**: ${(hitRate * 100).toFixed(1)}%`);
+    if (hitRate !== null) row2.push(`**Hit Rate**: ${(hitRate * 100).toFixed(1)}%`);
     if (advice) row2.push(`**Advice**: \`${advice}\``);
-    if (savedUsd !== null && cacheDiag.estimatedSavedUsd !== undefined && cacheDiag.estimatedSavedUsd !== null) {
+    if (savedUsd !== null) {
       row2.push(`**Est. Saved**: ${savedUsd}`);
     }
     if (cacheDiag.ttlStatus && cacheDiag.ttlStatus !== "cold") {
+      const ttlRem = toFiniteNumber(cacheDiag.ttlRemainingSec);
       const ttlDetail =
         cacheDiag.ttlStatus === "expired"
           ? "expired"
-          : Number.isFinite(Number(cacheDiag.ttlRemainingSec))
-            ? `${formatDurationCompact(cacheDiag.ttlRemainingSec)} left`
+          : ttlRem !== null
+            ? `${formatDurationCompact(ttlRem)} left`
             : cacheDiag.ttlStatus;
       row2.push(`**TTL**: ${ttlDetail}`);
     }

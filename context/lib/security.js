@@ -184,6 +184,9 @@ export function isPrivateOrReservedIp(rawIp) {
     return true;
   }
 
+  // 0000::/8 (IANA reserved, after checking ::ffff:, ::/96, and 64:ff9b:: above)
+  if (v6[0] === 0x00) return true;
+
   // 2002::/16 (6to4 — inspect embedded IPv4 in bytes 2..5)
   if (v6[0] === 0x20 && v6[1] === 0x02) {
     if (isPrivateOrReservedIpv4Bytes(v6.subarray(2, 6))) return true;
@@ -191,10 +194,8 @@ export function isPrivateOrReservedIp(rawIp) {
 
   // fc00::/7 (Unique Local Address)
   if ((v6[0] & 0xfe) === 0xfc) return true;
-  // fe80::/10 (Link-Local)
-  if (v6[0] === 0xfe && (v6[1] & 0xc0) === 0x80) return true;
-  // fec0::/10 (deprecated Site-Local)
-  if (v6[0] === 0xfe && (v6[1] & 0xc0) === 0xc0) return true;
+  // fe00::/8 (covers fe00::/9 reserved, fe80::/10 Link-Local, fec0::/10 deprecated Site-Local)
+  if (v6[0] === 0xfe) return true;
   // ff00::/8 (Multicast)
   if (v6[0] === 0xff) return true;
   // 100::/64 (Discard-Only)
@@ -231,7 +232,9 @@ export function isBlockedHostname(hostname) {
  */
 export async function validateFetchTarget(urlStr, options = {}) {
   const allowPrivate =
-    Boolean(options.allowPrivate) || getEffectiveConfig().allowPrivateUrls;
+    typeof options.allowPrivate === "boolean"
+      ? options.allowPrivate
+      : Boolean(getEffectiveConfig().allowPrivateUrls);
   const lookupFn = options.lookupFn || dns.promises.lookup;
 
   let parsed;
@@ -297,19 +300,78 @@ export async function validateFetchTarget(urlStr, options = {}) {
   };
 }
 
-/** Strip embedded userinfo credentials from a URL before logging, indexing labels, or returning */
+const SENSITIVE_QUERY_KEY_RE =
+  /(?:^|[_-])(?:api[_-]?key|key|token|secret|pass(?:word)?|pwd|auth(?:orization)?|sig(?:nature)?|cred(?:ential)?s?|jwt|bearer|access[_-]?token|refresh[_-]?token|session(?:[_-]?id)?|cookie|private[_-]?key)$/i;
+
+/** Strip embedded userinfo credentials and redact sensitive query params from a URL before logging/indexing */
 export function sanitizeUrlForDisplay(urlStr) {
   if (!urlStr || typeof urlStr !== "string") return "";
   try {
     const u = new URL(urlStr);
+    let mutated = false;
     if (u.username || u.password) {
       u.username = "";
       u.password = "";
-      return u.toString();
+      mutated = true;
     }
-    return urlStr;
+    if (u.search) {
+      const keys = [...new Set([...u.searchParams.keys()])];
+      for (const key of keys) {
+        const vals = u.searchParams.getAll(key);
+        const keySensitive = SENSITIVE_QUERY_KEY_RE.test(key);
+        let keyChanged = false;
+        const nextVals = vals.map((v) => {
+          if (keySensitive && v) {
+            keyChanged = true;
+            return "[REDACTED]";
+          }
+          if (v && redactSecrets(v, { force: true }).redactedCount > 0) {
+            keyChanged = true;
+            return "[REDACTED]";
+          }
+          return v;
+        });
+        if (keyChanged) {
+          mutated = true;
+          u.searchParams.delete(key);
+          for (const nv of nextVals) {
+            u.searchParams.append(key, nv);
+          }
+        }
+      }
+    }
+    if (u.hash && u.hash.length > 1) {
+      const hashBody = u.hash.slice(1);
+      if (hashBody.includes("=")) {
+        const parts = hashBody.split("&");
+        let hashChanged = false;
+        const nextParts = parts.map((seg) => {
+          const eq = seg.indexOf("=");
+          if (eq === -1) return seg;
+          const k = seg.slice(0, eq);
+          const v = seg.slice(eq + 1);
+          if (v && (SENSITIVE_QUERY_KEY_RE.test(k) || redactSecrets(v, { force: true }).redactedCount > 0)) {
+            hashChanged = true;
+            return `${k}=[REDACTED]`;
+          }
+          return seg;
+        });
+        if (hashChanged) {
+          u.hash = `#${nextParts.join("&")}`;
+          mutated = true;
+        }
+      }
+      const hashRedacted = redactSecrets(u.hash, { force: true });
+      if (hashRedacted.redactedCount > 0) {
+        u.hash = hashRedacted.text;
+        mutated = true;
+      }
+    }
+    const out = mutated ? u.toString() : urlStr;
+    return redactSecrets(out, { force: true }).text;
   } catch {
-    return urlStr.replace(/(https?:\/\/)[^@\s/]+@/gi, "$1[REDACTED:URL_CREDS]@");
+    const stripped = urlStr.replace(/(https?:\/\/)[^@\s/]+@/gi, "$1[REDACTED:URL_CREDS]@");
+    return redactSecrets(stripped, { force: true }).text;
   }
 }
 
@@ -463,13 +525,7 @@ export function getSensitiveFileGuardMode() {
 
 const SAFE_DOTENV_SUFFIXES = [".example", ".sample", ".template", ".schema", ".dist", ".defaults"];
 
-/** Detect whether a file path likely contains raw credentials, private keys, or secrets */
-export function detectSensitiveFile(filePath) {
-  if (!filePath || typeof filePath !== "string") {
-    return { sensitive: false, reason: null };
-  }
-  const normalized = filePath.replace(/\\/g, "/");
-  const lower = normalized.toLowerCase();
+function detectSensitiveNormalizedPath(lower) {
   const base = path.posix.basename(lower);
   const ext = path.posix.extname(base);
 
@@ -491,7 +547,7 @@ export function detectSensitiveFile(filePath) {
     return { sensitive: true, reason: `private key / keystore (${ext})` };
   }
 
-  if (/^id_(?:rsa|ed25519|ecdsa|dsa)$/.test(base) || lower.includes("/.ssh/id_") && !base.endsWith(".pub")) {
+  if (/^id_(?:rsa|ed25519|ecdsa|dsa)$/.test(base) || (/(?:^|\/)\.ssh\/id_/.test(lower) && !base.endsWith(".pub"))) {
     return { sensitive: true, reason: "SSH private key" };
   }
 
@@ -506,8 +562,8 @@ export function detectSensitiveFile(filePath) {
   }
 
   if (
-    lower.endsWith("/.aws/credentials") ||
-    lower.endsWith("/.kube/config") ||
+    /(?:^|\/)\.aws\/credentials$/.test(lower) ||
+    /(?:^|\/)\.kube\/config$/.test(lower) ||
     base === "credentials.json" ||
     base === "application_default_credentials.json" ||
     /^service[-_]?account.*\.json$/.test(base) ||
@@ -516,5 +572,43 @@ export function detectSensitiveFile(filePath) {
     return { sensitive: true, reason: `cloud/service credential file (${base})` };
   }
 
+  return { sensitive: false, reason: null };
+}
+
+/** Detect whether a file path likely contains raw credentials, private keys, or secrets */
+export function detectSensitiveFile(filePath) {
+  if (!filePath || typeof filePath !== "string") {
+    return { sensitive: false, reason: null };
+  }
+  let normalized = filePath.replace(/\\/g, "/");
+  // Handle Windows drive prefix cleanly for both `C:/foo` and drive-relative `C:.env` / `C:.aws/credentials`
+  let drivePrefix = "";
+  if (/^[a-zA-Z]:/.test(normalized)) {
+    drivePrefix = normalized.slice(0, 2).toLowerCase();
+    normalized = normalized.slice(2);
+  }
+
+  // 1. Check raw (drive-stripped) lowercased path so POSIX filenames containing literal `:` (e.g. `prod:api.env`) are caught
+  const rawLower = normalized.toLowerCase();
+  const rawHit = detectSensitiveNormalizedPath(rawLower);
+  if (rawHit.sensitive) return rawHit;
+
+  // 2. Check Windows NTFS-normalized path (strip `:stream` ADS suffixes and trailing dots/spaces per segment)
+  const cleanSegments = normalized.split("/").map((seg) => {
+    let s = seg.toLowerCase();
+    const colonIdx = s.indexOf(":");
+    if (colonIdx > 0) {
+      s = s.slice(0, colonIdx);
+    }
+    s = s.replace(/[. ]+$/, "");
+    return s;
+  });
+  const ntfsLower = cleanSegments.join("/");
+  if (ntfsLower !== rawLower) {
+    const ntfsHit = detectSensitiveNormalizedPath(ntfsLower);
+    if (ntfsHit.sensitive) return ntfsHit;
+  }
+
+  void drivePrefix;
   return { sensitive: false, reason: null };
 }

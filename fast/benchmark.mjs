@@ -124,10 +124,7 @@ var GIT_BRANCH_VALUE_FLAGS = /* @__PURE__ */ new Set([
   "--no-merged",
   "--points-at",
   "--sort",
-  "--format",
-  "--abbrev",
-  "--color",
-  "--column"
+  "--format"
 ]);
 var KNOWN_SYSTEM_BIN_PREFIXES = [
   "/bin/",
@@ -1418,6 +1415,7 @@ async function main(argv) {
       if (!afterDoubleDash && a === "--local") {
         targets.push(
           path2.join(os.homedir(), ".gemini", "antigravity", "brain"),
+          path2.join(os.homedir(), ".gemini", "antigravity-ide", "brain"),
           path2.join(os.homedir(), ".gemini", "antigravity-cli", "brain")
         );
         continue;

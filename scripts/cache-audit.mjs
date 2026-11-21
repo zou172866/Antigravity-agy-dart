@@ -105,7 +105,7 @@ function normalizePathKey(p) {
 function toPosixDisplay(p, baseDir = "") {
   if (baseDir) {
     const rel = path.relative(baseDir, p);
-    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+    if (rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel)) {
       return rel.replace(/\\/g, "/");
     }
   }
@@ -128,8 +128,8 @@ function isCjkCodePoint(cp) {
 }
 
 /**
- * CJK / UTF-8-aware token estimator.
- * Avoids the severe (~4-5x) undercount of `chars / 4` on Chinese/Japanese/Korean rules.
+ * CJK / UTF-8-aware token estimator (exact quarter-token integer formula aligned with scripts/prefix-budget.mjs).
+ * Avoids both the ~4-5x undercount of `chars / 4` on CJK rules and IEEE-754 float drift.
  */
 export function estimateTokens(input) {
   if (typeof input === "number") {
@@ -138,20 +138,21 @@ export function estimateTokens(input) {
   const str = String(input ?? "");
   if (!str) return 0;
 
-  let weighted = 0;
-  for (const ch of str) {
-    const cp = ch.codePointAt(0);
-    if (cp < 0x80) {
-      weighted += 0.25;
+  let quarterTokens = 0;
+  for (let i = 0; i < str.length; ) {
+    const cp = str.codePointAt(i);
+    i += cp > 0xffff ? 2 : 1;
+    if (cp <= 0x7f) {
+      quarterTokens += 1; // 0.25 tok/char
     } else if (isCjkCodePoint(cp)) {
-      weighted += 1.25;
+      quarterTokens += 5; // 1.25 tok/char
     } else if (cp > 0xffff) {
-      weighted += 2.0;
+      quarterTokens += 6; // 1.50 tok/char
     } else {
-      weighted += 0.65;
+      quarterTokens += 4; // 1.00 tok/char
     }
   }
-  return Math.ceil(weighted);
+  return Math.ceil(quarterTokens / 4);
 }
 
 function measureTextStats(text) {
@@ -159,22 +160,23 @@ function measureTextStats(text) {
   let cjkChars = 0;
   let asciiChars = 0;
   let otherChars = 0;
-  let weighted = 0;
+  let quarterTokens = 0;
 
-  for (const ch of str) {
-    const cp = ch.codePointAt(0);
-    if (cp < 0x80) {
+  for (let i = 0; i < str.length; ) {
+    const cp = str.codePointAt(i);
+    i += cp > 0xffff ? 2 : 1;
+    if (cp <= 0x7f) {
       asciiChars += 1;
-      weighted += 0.25;
+      quarterTokens += 1;
     } else if (isCjkCodePoint(cp)) {
       cjkChars += 1;
-      weighted += 1.25;
+      quarterTokens += 5;
     } else if (cp > 0xffff) {
       otherChars += 1;
-      weighted += 2.0;
+      quarterTokens += 6;
     } else {
       otherChars += 1;
-      weighted += 0.65;
+      quarterTokens += 4;
     }
   }
 
@@ -184,7 +186,7 @@ function measureTextStats(text) {
     cjkChars,
     asciiChars,
     otherChars,
-    tokens: Math.ceil(weighted),
+    tokens: Math.ceil(quarterTokens / 4),
     sha256: sha256Hex(str)
   };
 }
@@ -656,13 +658,45 @@ function probeMcpServerOnce({ command, args, cwd, env, timeoutMs }) {
 
     let child;
     try {
-      child = spawn(resolvedCmd, args, {
-        cwd,
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        shell: needsShell
-      });
+      if (needsShell) {
+        const strArgs = Array.isArray(args) ? args.map((a) => String(a)) : [];
+        if (
+          resolvedCmd.includes('"') ||
+          /[\r\n\0]/.test(resolvedCmd) ||
+          strArgs.some((a) => a.includes('"') || /[\r\n\0]/.test(a))
+        ) {
+          resolve({
+            ok: false,
+            status: "error",
+            durationMs: Date.now() - t0,
+            error: "Unsafe quote or control character in Windows shell-wrapped MCP server command/arguments"
+          });
+          return;
+        }
+        // Env-var indirection prevents cmd.exe metacharacter injection AND %VAR% environment expansion
+        const cmdEnv = { ...env, __AGY_CMD_FILE: resolvedCmd };
+        const argRefs = strArgs.map((arg, idx) => {
+          const key = `__AGY_CMD_ARG_${idx}`;
+          cmdEnv[key] = arg;
+          return `"%${key}%"`;
+        });
+        const cmdLine = `"${['"%__AGY_CMD_FILE%"', ...argRefs].join(" ")}"`;
+        child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmdLine], {
+          cwd,
+          env: cmdEnv,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          windowsVerbatimArguments: true
+        });
+      } else {
+        child = spawn(resolvedCmd, args, {
+          cwd,
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true
+        });
+      }
+      child.stdin?.on("error", () => {});
     } catch (err) {
       resolve({
         ok: false,
@@ -1006,6 +1040,11 @@ async function auditMcpServers(configDir, workspaceDir, activePlugins, { live, t
       }
 
       const pluginDataDir = tmpProbeDir ? path.join(tmpProbeDir, `data-${idx}`) : os.tmpdir();
+      if (tmpProbeDir && live) {
+        try {
+          fs.mkdirSync(pluginDataDir, { recursive: true });
+        } catch {}
+      }
       const vars = {
         PLUGIN_ROOT: pluginRoot,
         PLUGIN_DATA: pluginDataDir,
@@ -1274,43 +1313,45 @@ const REGEX_PRECEDING_CHARS = new Set([
   "(", "[", "{", ",", ";", ":", "=", "?", "!", "&", "|", "^", "~", "+", "-", "*", "%", "<", ">", "/"
 ]);
 
-function stripJsComments(source) {
-  let out = "";
+function stripJsComments(source, { maskStrings = true } = {}) {
   const n = source.length;
+  let out = "";
   let i = 0;
-  let quote = null;
-  let inTemplateExprDepth = 0;
   let canStartRegex = true;
+  // Stack of brace depths inside template `${ ... }` expressions (0 when waiting for closing `}`)
+  const templateBraceStack = [];
+
+  const scanTemplateText = (startPos) => {
+    let k = startPos;
+    while (k < n) {
+      const tc = source[k];
+      const tn = source[k + 1];
+      if (tc === "\\" && k + 1 < n) {
+        out += maskStrings ? (tn === "\n" ? "_\n" : "__") : tc + tn;
+        k += 2;
+        continue;
+      }
+      if (tc === "$" && tn === "{") {
+        out += "${";
+        templateBraceStack.push(0);
+        canStartRegex = true;
+        return k + 2;
+      }
+      if (tc === "`") {
+        out += "`";
+        canStartRegex = false;
+        return k + 1;
+      }
+      out += maskStrings && tc !== "\n" && tc !== "\r" ? "_" : tc;
+      k += 1;
+    }
+    canStartRegex = false;
+    return k;
+  };
 
   while (i < n) {
     const ch = source[i];
     const next = source[i + 1];
-
-    if (quote) {
-      out += ch;
-      if (ch === "\\" && i + 1 < n) {
-        out += next;
-        i += 2;
-        continue;
-      }
-      if (quote === "`" && ch === "$" && next === "{") {
-        out += next;
-        inTemplateExprDepth += 1;
-        i += 2;
-        continue;
-      }
-      if (quote === "`" && inTemplateExprDepth > 0 && ch === "}") {
-        inTemplateExprDepth -= 1;
-        i += 1;
-        continue;
-      }
-      if (ch === quote && (quote !== "`" || inTemplateExprDepth === 0)) {
-        quote = null;
-        canStartRegex = false;
-      }
-      i += 1;
-      continue;
-    }
 
     if (ch === "/" && next === "/") {
       // Line comment
@@ -1329,7 +1370,7 @@ function stripJsComments(source) {
       continue;
     }
     if (ch === "/" && canStartRegex) {
-      // JS regex literal: preserve verbatim so escaped slashes (\/) & * inside /.../ never start comments
+      // JS regex literal: mask body in JS mode so regexes like `/systemMessage|Date\.now/` never false-positive
       let j = i + 1;
       let inCharClass = false;
       let closed = false;
@@ -1355,15 +1396,81 @@ function stripJsComments(source) {
         j += 1;
       }
       if (closed) {
-        out += source.slice(i, j);
+        const rawRe = source.slice(i, j);
+        if (maskStrings) {
+          const lastSlash = rawRe.lastIndexOf("/");
+          const bodyLen = Math.max(0, lastSlash - 1);
+          out += `/${"_".repeat(bodyLen)}${rawRe.slice(lastSlash)}`;
+        } else {
+          out += rawRe;
+        }
         i = j;
         canStartRegex = false;
         continue;
       }
     }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      quote = ch;
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        const sc = source[j];
+        if (sc === "\\" && j + 1 < n) {
+          j += 2;
+          continue;
+        }
+        if (sc === quote) {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      const rawStr = source.slice(i, j);
+      if (!maskStrings) {
+        out += rawStr;
+      } else {
+        const isClosed = rawStr.length >= 2 && rawStr.endsWith(quote);
+        const inner = isClosed ? rawStr.slice(1, -1) : rawStr.slice(1);
+        let afterIdx = j;
+        while (afterIdx < n && /\s/.test(source[afterIdx])) afterIdx += 1;
+        const isTrackedPropKey = source[afterIdx] === ":" && (inner === "systemMessage" || inner === "user_markdown");
+        if (inner.length === 0 || isTrackedPropKey) {
+          out += rawStr;
+        } else {
+          const maskedInner = inner.replace(/[^\n\r]/g, "_");
+          out += isClosed ? `${quote}${maskedInner}${quote}` : `${quote}${maskedInner}`;
+        }
+      }
+      i = j;
+      canStartRegex = false;
+      continue;
+    }
+    if (ch === "`") {
+      out += "`";
+      i = scanTemplateText(i + 1);
+      continue;
+    }
+    if (ch === "{") {
+      if (templateBraceStack.length > 0) {
+        templateBraceStack[templateBraceStack.length - 1] += 1;
+      }
       out += ch;
+      canStartRegex = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "}") {
+      if (templateBraceStack.length > 0) {
+        const top = templateBraceStack[templateBraceStack.length - 1];
+        if (top === 0) {
+          templateBraceStack.pop();
+          out += "}";
+          i = scanTemplateText(i + 1);
+          continue;
+        }
+        templateBraceStack[templateBraceStack.length - 1] = top - 1;
+      }
+      out += ch;
+      canStartRegex = true;
       i += 1;
       continue;
     }
@@ -1388,7 +1495,6 @@ function stripJsComments(source) {
       if ((ch === "+" && next === "+") || (ch === "-" && next === "-")) {
         out += ch + next;
         i += 2;
-        // Postfix ++ / -- leaves division possible; prefix allows regex, keep conservative false unless already true
         continue;
       }
       canStartRegex = REGEX_PRECEDING_CHARS.has(ch);
@@ -1428,14 +1534,91 @@ function stripShellComments(source) {
 }
 
 function stripPs1Comments(source) {
-  const withoutBlocks = source.replace(/<#[\s\S]*?#>/g, " ");
-  return stripShellComments(withoutBlocks);
+  // PowerShell uses backtick `` ` `` (NOT backslash `\`) to escape quotes inside double-quoted strings,
+  // `""` / `''` for doubled quotes, `@"..."@` / `@'...'@` here-strings, `<# ... #>` block comments, and `#` line comments.
+  let out = "";
+  const n = source.length;
+  let i = 0;
+  let quote = null;
+  while (i < n) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += ch;
+      if (quote === '"' && ch === "`" && i + 1 < n) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        if (next === quote) {
+          out += next;
+          i += 2;
+          continue;
+        }
+        quote = null;
+      }
+      i += 1;
+      continue;
+    }
+    // PowerShell here-strings: @"<newline>...<newline>"@ (expandable) and @'<newline>...<newline>'@ (verbatim)
+    if (ch === "@" && (next === '"' || next === "'")) {
+      let nlIdx = i + 2;
+      while (nlIdx < n && (source[nlIdx] === " " || source[nlIdx] === "\t")) nlIdx += 1;
+      if (nlIdx < n && (source[nlIdx] === "\n" || source[nlIdx] === "\r")) {
+        const hQuote = next;
+        const isVerbatim = hQuote === "'";
+        const lineStart = source[nlIdx] === "\r" && source[nlIdx + 1] === "\n" ? nlIdx + 2 : nlIdx + 1;
+        out += source.slice(i, lineStart);
+        i = lineStart;
+        while (i < n) {
+          // Closing delimiter MUST appear at column 0 (`"@` or `'@`)
+          if (source[i] === hQuote && source[i + 1] === "@") {
+            out += source.slice(i, i + 2);
+            i += 2;
+            break;
+          }
+          // Consume entire line
+          while (i < n && source[i] !== "\n") {
+            const c = source[i];
+            out += isVerbatim && c !== "\r" ? "_" : c;
+            i += 1;
+          }
+          if (i < n && source[i] === "\n") {
+            out += "\n";
+            i += 1;
+          }
+        }
+        continue;
+      }
+    }
+    if (ch === "<" && next === "#") {
+      i += 2;
+      while (i < n && !(source[i] === "#" && source[i + 1] === ">")) {
+        if (source[i] === "\n") out += "\n";
+        i += 1;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "#") {
+      while (i < n && source[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 function stripCommentsForExt(source, ext) {
   const lower = String(ext || "").toLowerCase();
   if (lower === ".sh" || lower === ".bash") return stripShellComments(source);
   if (lower === ".ps1" || lower === ".psm1") return stripPs1Comments(source);
+  if (lower === ".inline") return stripJsComments(source, { maskStrings: false });
   return stripJsComments(source);
 }
 
@@ -1556,8 +1739,37 @@ function extractExpressionUntilTerminator(code, startIdx) {
       if (braceDepth === 0) break;
       braceDepth -= 1;
     } else if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
-      if (ch === "," || ch === ";" || ch === "\n" || ch === "\r") {
+      if (ch === "," || ch === ";") {
         break;
+      }
+      if (ch === "\n" || ch === "\r") {
+        // Allow multiline expression continuation (e.g. `"a"\n + Date.now()` or `"a" +\r\n Date.now()`)
+        let prevIdx = i - 1;
+        while (
+          prevIdx >= begin &&
+          (code[prevIdx] === " " || code[prevIdx] === "\t" || code[prevIdx] === "\r" || code[prevIdx] === "\n")
+        ) {
+          prevIdx -= 1;
+        }
+        const prevChar = prevIdx >= begin ? code[prevIdx] : "";
+        let nextIdx = i + 1;
+        while (nextIdx < code.length && (code[nextIdx] === " " || code[nextIdx] === "\t" || code[nextIdx] === "\r" || code[nextIdx] === "\n")) {
+          nextIdx += 1;
+        }
+        const nextChar = nextIdx < code.length ? code[nextIdx] : "";
+        const nextTwo = nextIdx + 1 < code.length ? code.slice(nextIdx, nextIdx + 2) : "";
+        const continuesPrev = prevChar === "+" || prevChar === "?" || prevChar === ":" || prevChar === "." || prevChar === "|" || prevChar === "&";
+        const continuesNext =
+          nextChar === "+" ||
+          nextChar === "?" ||
+          nextChar === ":" ||
+          nextChar === "." ||
+          nextTwo === "||" ||
+          nextTwo === "&&" ||
+          nextTwo === "??";
+        if (!continuesPrev && !continuesNext) {
+          break;
+        }
       }
     }
     i += 1;
@@ -1615,18 +1827,66 @@ function buildLocalSymbolTable(code, langGroup) {
       }
     }
 
-    // Function declarations — capture ONLY their return expressions so internal DB/timing helpers never cause false positives!
-    const fnDecl = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
+    // Function declarations — balance parens (handles default params with calls like `fn(ts = Date.now())`)
+    // and scope default parameter taint ONLY to this function's own returned values (never polluting global symbols).
+    const fnDecl = /\bfunction\*?\s+([A-Za-z_$][\w$]*)\s*\(/g;
     while ((m = fnDecl.exec(code)) !== null) {
-      const braceStart = m.index + m[0].length - 1;
+      const parenStart = m.index + m[0].length - 1;
+      const parenEnd = findMatchingDelimiter(code, parenStart, "(", ")");
+      if (parenEnd === -1) continue;
+      const paramStr = code.slice(parenStart + 1, parenEnd);
+      const localDefaults = new Map();
+      const defParamRe = /\b([A-Za-z_$][\w$]*)\s*=(?!=)/g;
+      let pm;
+      while ((pm = defParamRe.exec(paramStr)) !== null) {
+        const { expr } = extractExpressionUntilTerminator(paramStr, pm.index + pm[0].length);
+        if (expr) localDefaults.set(pm[1], expr);
+      }
+      let braceStart = parenEnd + 1;
+      while (braceStart < code.length && /\s/.test(code[braceStart])) braceStart += 1;
+      if (code[braceStart] !== "{") continue;
       const braceEnd = findMatchingDelimiter(code, braceStart, "{", "}");
       if (braceEnd !== -1) {
         const body = code.slice(braceStart + 1, braceEnd);
+        const bodyVars = new Map();
+        if (localDefaults.size > 0) {
+          const bvRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g;
+          let bm;
+          while ((bm = bvRe.exec(body)) !== null) {
+            const { expr } = extractExpressionUntilTerminator(body, bm.index + bm[0].length);
+            if (expr) {
+              if (!bodyVars.has(bm[1])) bodyVars.set(bm[1], []);
+              bodyVars.get(bm[1]).push(expr);
+            }
+          }
+        }
         const retRe = /\breturn\b/g;
         let rm;
         while ((rm = retRe.exec(body)) !== null) {
           const { expr } = extractExpressionUntilTerminator(body, rm.index + rm[0].length);
-          if (expr) addDef(m[1], expr);
+          if (expr) {
+            addDef(m[1], expr);
+            if (localDefaults.size > 0) {
+              const seen = new Set();
+              const queue = [...extractReferencedIdentifiers(expr, "js")];
+              let hops = 0;
+              while (queue.length > 0 && hops < 32) {
+                const id = queue.shift();
+                if (seen.has(id)) continue;
+                seen.add(id);
+                hops += 1;
+                if (localDefaults.has(id)) {
+                  addDef(m[1], localDefaults.get(id));
+                } else if (bodyVars.has(id)) {
+                  for (const rhs of bodyVars.get(id)) {
+                    for (const subId of extractReferencedIdentifiers(rhs, "js")) {
+                      if (!seen.has(subId)) queue.push(subId);
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -1892,7 +2152,7 @@ function resolveHookTarget(rawCommand, baseDir, workspaceDir) {
     const tokLower = tok.toLowerCase();
     if (isPowerShell) {
       if ((tokLower === "-command" || tokLower === "-c") && idx + 1 < tokens.length) {
-        return { kind: "inline", scriptPath: null, inlineCode: tokens[idx + 1] };
+        return { kind: "inline", scriptPath: null, inlineCode: tokens.slice(idx + 1).join(" ") };
       }
       if (tokLower === "-file" || tokLower === "-f") {
         if (idx + 1 < tokens.length) {
@@ -2104,10 +2364,10 @@ function auditHooksAndPlugins(configDir, workspaceDir, activePlugins, disabledPl
         injectsDynamicSystemMessage: false,
         dynamicPatterns: []
       };
-      let status = "safe";
+      const shouldInspectSource = hook.event === "SessionStart" || MID_SESSION_EVENTS.has(hook.event);
+      let status = shouldInspectSource ? "safe" : "not_inspected";
       let scriptPath = resolved.scriptPath;
 
-      const shouldInspectSource = hook.event === "SessionStart" || MID_SESSION_EVENTS.has(hook.event);
       if (shouldInspectSource) {
         if (resolved.kind === "script") {
           if (scriptPath && isFile(scriptPath)) {

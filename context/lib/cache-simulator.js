@@ -493,14 +493,19 @@ function replayTtlPolicy(traces, parsedOpts, observedCostUsd, { id, label, ttlSe
   let maxWriteMultUsed = 1.0;
 
   for (const trace of traces) {
-    const policyWriteMult =
+    const rawPolicyWriteMult =
       tier === "1h"
         ? (parsedOpts.explicitWrite1hMultiplier ?? trace.longWriteMult)
         : (parsedOpts.explicitWriteMultiplier ?? trace.baseWriteMult);
-    if (policyWriteMult > maxWriteMultUsed) maxWriteMultUsed = policyWriteMult;
+    // When transcripts omit cache_creation_tokens, observed baseline bills uncached tokens at 1.0x.
+    // Charge only the incremental tier surcharge above baseWriteMult so equivalent ttl-5m matches observed.
+    const policyWriteMult = trace.hasExplicitCacheCreation
+      ? rawPolicyWriteMult
+      : Math.max(1.0, 1.0 + (rawPolicyWriteMult - trace.baseWriteMult));
+    if (rawPolicyWriteMult > maxWriteMultUsed) maxWriteMultUsed = rawPolicyWriteMult;
 
     const isExplicitWriteModel =
-      trace.baseWriteMult > 1.0 || trace.longWriteMult > 1.0 || policyWriteMult > 1.0;
+      trace.baseWriteMult > 1.0 || trace.longWriteMult > 1.0 || rawPolicyWriteMult > 1.0;
 
     let sessCached = 0;
     let sessUncached = 0;
@@ -743,10 +748,10 @@ function replayColdBoundaryCompactPolicy(traces, observedCostUsd) {
         compactionsTriggered += 1;
         tokensShedAtBoundaries += shedNow;
 
-        // Already a cold boundary due to TTL expiry
+        // Already a cold boundary due to TTL expiry; only the retained compacted prefix is refilled (not brand-new turnDelta)
         totalBusts += 1;
         simRead = 0;
-        totalWasted += Math.min(prevSimCtx, simCtx);
+        totalWasted += Math.min(prevSimCtx, compactedPrefix);
 
         const split = splitProportionalNewTokens(simCtx, turn.cacheCreationTokens, turn.uncachedTokens);
         simWrite = split.simWrite;

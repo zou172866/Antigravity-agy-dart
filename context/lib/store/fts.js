@@ -11,15 +11,16 @@ import {
 export class FtsMethods {
   /** Safely split an oversized single line into <= maxBytes UTF-8 slices */
   _splitOversizedLine(line, maxBytes) {
+    const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : 1;
     const parts = [];
     let buf = Buffer.from(line, "utf8");
-    while (buf.length > maxBytes) {
-      let cut = maxBytes;
+    while (buf.length > limit) {
+      let cut = limit;
       // Back up if we landed on a UTF-8 continuation byte (10xxxxxx)
       while (cut > 0 && (buf[cut] & 0xc0) === 0x80) {
         cut -= 1;
       }
-      if (cut === 0) cut = maxBytes;
+      if (cut === 0) cut = Math.min(buf.length, limit);
       parts.push(buf.subarray(0, cut).toString("utf8"));
       buf = buf.subarray(cut);
     }
@@ -245,13 +246,15 @@ export class FtsMethods {
         .prepare(`
           SELECT id, label, bytes_total, chunk_count
           FROM sources
-          WHERE session_id = ? AND content_hash = ?
+          WHERE session_id = ? AND worktree = ? AND content_hash = ?
           ORDER BY accessed_ts DESC
           LIMIT 1
         `)
-        .get(sid, contentHash);
+        .get(sid, wt, contentHash);
       if (existing) {
-        this.db.prepare("UPDATE sources SET accessed_ts = ? WHERE id = ?").run(now, existing.id);
+        this._withBusyRetry(() => {
+          this.db.prepare("UPDATE sources SET accessed_ts = ? WHERE id = ?").run(now, existing.id);
+        });
         return {
           sourceId: existing.id,
           bytesTotal: existing.bytes_total,
@@ -269,6 +272,8 @@ export class FtsMethods {
     const detailedChunks = this.chunkContentDetailed(rawText, MAX_CHUNK_BYTES, { label: lbl, isMarkdown });
     const chunkCount = detailedChunks.length;
 
+    const deleteOldChunks = this.db.prepare("DELETE FROM chunks WHERE source_id = ?");
+    const deleteOldChunksTri = this.db.prepare("DELETE FROM chunks_tri WHERE source_id = ?");
     const insertSource = this.db.prepare(`
       INSERT OR REPLACE INTO sources (
         id, session_id, worktree, agent, kind, label, bytes_total, chunk_count, created_ts, created_at, accessed_ts, content_hash
@@ -285,13 +290,19 @@ export class FtsMethods {
       VALUES (?, ?, ?, ?)
     `);
 
-    insertSource.run(id, sid, wt, ag, k, lbl, totalBytes, chunkCount, now, isoDate, now, contentHash);
+    this._withWriteTx(() => {
+      if (sourceId) {
+        deleteOldChunks.run(id);
+        deleteOldChunksTri.run(id);
+      }
+      insertSource.run(id, sid, wt, ag, k, lbl, totalBytes, chunkCount, now, isoDate, now, contentHash);
 
-    for (let ord = 0; ord < chunkCount; ord++) {
-      const ch = detailedChunks[ord];
-      insertChunk.run(id, sid, wt, ag, ord, ch.body, ch.title || lbl);
-      insertChunkTri.run(id, sid, ord, ch.body);
-    }
+      for (let ord = 0; ord < chunkCount; ord++) {
+        const ch = detailedChunks[ord];
+        insertChunk.run(id, sid, wt, ag, ord, ch.body, ch.title || lbl);
+        insertChunkTri.run(id, sid, ord, ch.body);
+      }
+    });
 
     this.pruneStaleSources();
 
@@ -333,7 +344,8 @@ export class FtsMethods {
         if (sourceId) {
           sql += " AND source_id = ?";
           params.push(sourceId);
-        } else if (scope === "session" && sessionId) {
+        }
+        if (scope === "session" && sessionId) {
           sql += " AND session_id = ?";
           params.push(sessionId);
         } else if (scope === "worktree" && worktree) {
@@ -384,7 +396,8 @@ export class FtsMethods {
         if (sourceId) {
           sqlTri += " AND t.source_id = ?";
           paramsTri.push(sourceId);
-        } else if (scope === "session" && sessionId) {
+        }
+        if (scope === "session" && sessionId) {
           sqlTri += " AND t.session_id = ?";
           paramsTri.push(sessionId);
         } else if (scope === "worktree" && worktree) {
@@ -491,23 +504,25 @@ export class FtsMethods {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const result = insert.run(
-      sessionId || "default",
-      worktree || process.cwd(),
-      agent || "antigravity",
-      kind || "tool",
-      tool || null,
-      key || null,
-      filePath || null,
-      ok ? 1 : 0,
-      exitCode ?? (ok ? 0 : 1),
-      bytes,
-      body || null,
-      turn,
-      sandboxBytes,
-      returnedBytes,
-      now,
-      now
+    const result = this._withBusyRetry(() =>
+      insert.run(
+        sessionId || "default",
+        worktree || process.cwd(),
+        agent || "antigravity",
+        kind || "tool",
+        tool || null,
+        key || null,
+        filePath || null,
+        ok ? 1 : 0,
+        exitCode ?? (ok ? 0 : 1),
+        bytes,
+        body || null,
+        turn,
+        sandboxBytes,
+        returnedBytes,
+        now,
+        now
+      )
     );
 
     return { seq: result.lastInsertRowid };
@@ -588,9 +603,13 @@ export class FtsMethods {
     };
   }
 
-  /** Retrieve full event body by sequence number */
-  getEventBySeq(seq) {
+  /** Retrieve full event body by sequence number (scoped to session when sessionId is provided) */
+  getEventBySeq(seq, sessionId = null) {
     this.open();
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
+      const row = this.db.prepare("SELECT * FROM events WHERE seq = ? AND session_id = ?").get(seq, sessionId);
+      return row || null;
+    }
     const row = this.db.prepare("SELECT * FROM events WHERE seq = ?").get(seq);
     return row || null;
   }

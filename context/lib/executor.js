@@ -12,7 +12,8 @@ export function runProcess({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxBytes = 10 * 1024 * 1024,
   env = process.env,
-  stdinData = null
+  stdinData = null,
+  windowsVerbatimArguments = false
 }) {
   return new Promise((resolve) => {
     const stdoutBuffer = [];
@@ -22,24 +23,88 @@ export function runProcess({
     let timedOut = false;
     let finished = false;
 
+    let forceCloseTimer = null;
+
     const child = spawn(cmd, args, {
       cwd: cwd || process.cwd(),
       env: { ...process.env, ...env },
+      detached: process.platform !== "win32",
       windowsHide: true,
+      windowsVerbatimArguments: Boolean(windowsVerbatimArguments),
       stdio: ["pipe", "pipe", "pipe"]
     });
 
+    child.stdin?.on("error", () => {});
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
+
+    const onFinish = (exitCode, signal) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (forceCloseTimer) {
+        clearTimeout(forceCloseTimer);
+        forceCloseTimer = null;
+      }
+
+      const stdout = Buffer.concat(stdoutBuffer).toString("utf8");
+      const stderr = Buffer.concat(stderrBuffer).toString("utf8");
+      const rawBytes = stdoutBytes + stderrBytes;
+
+      resolve({
+        ok: exitCode === 0 && !timedOut,
+        exitCode: timedOut ? 124 : (exitCode ?? (signal ? 1 : 0)),
+        signal,
+        timedOut,
+        stdout,
+        stderr,
+        rawBytes
+      });
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        if (process.platform === "win32") {
-          spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { windowsHide: true });
-        } else {
+      const pid = child.pid;
+      const fallbackKill = () => {
+        try {
           child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      };
+      try {
+        if (pid) {
+          if (process.platform === "win32") {
+            const sysRoot = process.env.SystemRoot || process.env.WINDIR;
+            const taskkillBin = sysRoot ? path.join(sysRoot, "System32", "taskkill.exe") : "taskkill";
+            const killer = spawn(taskkillBin, ["/F", "/T", "/PID", String(pid)], {
+              stdio: "ignore",
+              windowsHide: true
+            });
+            killer.on("error", fallbackKill);
+            killer.unref();
+          } else {
+            try {
+              process.kill(-pid, "SIGKILL");
+            } catch {
+              fallbackKill();
+            }
+          }
+        } else {
+          fallbackKill();
         }
       } catch {
-        // kill failed
+        fallbackKill();
       }
+      try {
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      } catch {
+        // ignore
+      }
+      forceCloseTimer = setTimeout(() => onFinish(124, "SIGKILL"), 500);
+      forceCloseTimer.unref?.();
     }, timeoutMs);
 
     if (stdinData && child.stdin) {
@@ -70,30 +135,14 @@ export function runProcess({
       }
     });
 
-    const onFinish = (exitCode, signal) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-
-      const stdout = Buffer.concat(stdoutBuffer).toString("utf8");
-      const stderr = Buffer.concat(stderrBuffer).toString("utf8");
-      const rawBytes = stdoutBytes + stderrBytes;
-
-      resolve({
-        ok: exitCode === 0 && !timedOut,
-        exitCode: timedOut ? 124 : (exitCode ?? (signal ? 1 : 0)),
-        signal,
-        timedOut,
-        stdout,
-        stderr,
-        rawBytes
-      });
-    };
-
     child.on("error", (err) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      if (forceCloseTimer) {
+        clearTimeout(forceCloseTimer);
+        forceCloseTimer = null;
+      }
       resolve({
         ok: false,
         exitCode: 1,
@@ -106,7 +155,6 @@ export function runProcess({
     });
 
     child.on("close", (code, sig) => onFinish(code, sig));
-    child.on("exit", (code, sig) => onFinish(code, sig));
   });
 }
 
@@ -122,6 +170,7 @@ export async function executeCode({
 }) {
   const normLang = String(language || "shell").toLowerCase().trim();
   const workdir = cwd || process.cwd();
+  const safeArgs = Array.isArray(args) ? args.map((a) => String(a)) : [];
 
   // 1. Node.js
   if (normLang === "nodejs" || normLang === "node" || normLang === "javascript" || normLang === "js") {
@@ -129,7 +178,7 @@ export async function executeCode({
       const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
       return runProcess({
         cmd: process.execPath,
-        args: [scriptPath, ...args],
+        args: [scriptPath, ...safeArgs],
         cwd: workdir,
         timeoutMs,
         env
@@ -137,7 +186,7 @@ export async function executeCode({
     }
     return runProcess({
       cmd: process.execPath,
-      args: ["-e", code, "--", ...args],
+      args: ["-e", code, "--", ...safeArgs],
       cwd: workdir,
       timeoutMs,
       env
@@ -151,7 +200,7 @@ export async function executeCode({
       const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
       return runProcess({
         cmd: pythonBin,
-        args: [scriptPath, ...args],
+        args: [scriptPath, ...safeArgs],
         cwd: workdir,
         timeoutMs,
         env
@@ -159,7 +208,7 @@ export async function executeCode({
     }
     return runProcess({
       cmd: pythonBin,
-      args: ["-c", code, ...args],
+      args: ["-c", code, ...safeArgs],
       cwd: workdir,
       timeoutMs,
       env
@@ -167,32 +216,88 @@ export async function executeCode({
   }
 
   // 3. PowerShell
-  if (normLang === "pwsh" || normLang === "powershell") {
-    const bin = "powershell.exe";
-    if (file) {
-      const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
+  const runPowerShellCommand = (bin, scriptText) => {
+    const psScript = scriptText || "";
+    if (safeArgs.length === 0) {
       return runProcess({
         cmd: bin,
-        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...args],
+        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
         cwd: workdir,
         timeoutMs,
         env
       });
     }
+    // Never append args after `-Command` (PowerShell concatenates them into script syntax -> command injection).
+    // Pass code and data arguments through env vars and invoke via ScriptBlock so `$args` receives literal strings.
+    const psEnv = { ...env, __AGY_PS_CODE: psScript };
+    const psArgRefs = safeArgs.map((arg, idx) => {
+      const key = `__AGY_PS_ARG_${idx}`;
+      psEnv[key] = arg;
+      return `$env:${key}`;
+    });
+    const wrapper = `& ([scriptblock]::Create($env:__AGY_PS_CODE)) ${psArgRefs.join(" ")}`;
     return runProcess({
       cmd: bin,
-      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", code],
+      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", wrapper],
       cwd: workdir,
       timeoutMs,
-      env
+      env: psEnv
     });
+  };
+
+  if (normLang === "pwsh" || normLang === "powershell") {
+    const bin = process.platform === "win32" ? "powershell.exe" : "pwsh";
+    if (file) {
+      const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
+      return runProcess({
+        cmd: bin,
+        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...safeArgs],
+        cwd: workdir,
+        timeoutMs,
+        env
+      });
+    }
+    return runPowerShellCommand(bin, code);
   }
 
   // 4. Windows CMD
   if (normLang === "cmd" || normLang === "bat") {
+    if (!code && file) {
+      const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
+      if (
+        scriptPath.includes('"') ||
+        /[\r\n\0]/.test(scriptPath) ||
+        safeArgs.some((a) => a.includes('"') || /[\r\n\0]/.test(a))
+      ) {
+        return {
+          ok: false,
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "Invalid script file path or argument for cmd execution",
+          rawBytes: 0
+        };
+      }
+      const cmdEnv = { ...env, __AGY_CMD_FILE: scriptPath };
+      const argRefs = safeArgs.map((arg, idx) => {
+        const key = `__AGY_CMD_ARG_${idx}`;
+        cmdEnv[key] = arg;
+        return `"%${key}%"`;
+      });
+      const cmdLine = `"${['"%__AGY_CMD_FILE%"', ...argRefs].join(" ")}"`;
+      return runProcess({
+        cmd: "cmd.exe",
+        args: ["/d", "/s", "/c", cmdLine],
+        cwd: workdir,
+        timeoutMs,
+        env: cmdEnv,
+        windowsVerbatimArguments: true
+      });
+    }
     return runProcess({
       cmd: "cmd.exe",
-      args: ["/d", "/s", "/c", code || (file ? `call "${file}"` : "")],
+      args: ["/d", "/s", "/c", code || ""],
       cwd: workdir,
       timeoutMs,
       env
@@ -201,18 +306,32 @@ export async function executeCode({
 
   // 5. Default Shell
   if (process.platform === "win32") {
-    return runProcess({
-      cmd: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", code || (file ? `& "${file}"` : "")],
-      cwd: workdir,
-      timeoutMs,
-      env
-    });
+    if (!code && file) {
+      const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
+      return runProcess({
+        cmd: "powershell.exe",
+        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...safeArgs],
+        cwd: workdir,
+        timeoutMs,
+        env
+      });
+    }
+    return runPowerShellCommand("powershell.exe", code || "");
   } else {
     const shell = process.env.SHELL || "/bin/sh";
+    if (!code && file) {
+      const scriptPath = path.isAbsolute(file) ? file : path.resolve(workdir, file);
+      return runProcess({
+        cmd: shell,
+        args: [scriptPath, ...safeArgs],
+        cwd: workdir,
+        timeoutMs,
+        env
+      });
+    }
     return runProcess({
       cmd: shell,
-      args: ["-c", code || (file ? `sh "${file}"` : "")],
+      args: safeArgs.length > 0 ? ["-c", code || "", "--", ...safeArgs] : ["-c", code || ""],
       cwd: workdir,
       timeoutMs,
       env

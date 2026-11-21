@@ -170,6 +170,23 @@ export class ContextModeStore {
     }
     throw lastErr;
   }
+
+  /** Execute a multi-statement write inside a single IMMEDIATE transaction with busy retry */
+  _withWriteTx(fn, maxAttempts = null) {
+    return this._withBusyRetry(() => {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const res = fn();
+        this.db.exec("COMMIT");
+        return res;
+      } catch (err) {
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {}
+        throw err;
+      }
+    }, maxAttempts);
+  }
 }
 
 attachPrototypeMethods(

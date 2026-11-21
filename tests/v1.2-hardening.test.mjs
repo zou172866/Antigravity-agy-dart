@@ -1145,7 +1145,7 @@ test("P1-Hardening 3: Static import-graph verification proves RUNTIME_FILES comp
       'test.skip("case 3", () => {});'
     ].join("\n");
     assert.equal(countTestCasesInSource(briefCounterSample), 3, "countTestCasesInSource must ignore regex quotes/`/*`/templates/comments/function* decls and count top-level tests + modifiers accurately");
-    assert.equal(computeBriefMetrics(ROOT).testCases, 106, "computeBriefMetrics(ROOT).testCases must match the exact 106 tests executed by npm test");
+    assert.equal(computeBriefMetrics(ROOT).testCases, 117, "computeBriefMetrics(ROOT).testCases must match the exact 117 tests executed by npm test");
 
     // P0-3: syncBriefFile normalizes CRLF checkouts on Windows CI and .gitattributes enforces LF/CRLF policy
     const gitAttrsPath = path.join(ROOT, ".gitattributes");

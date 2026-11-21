@@ -67,13 +67,22 @@ function parseDisableEnvFlag(raw) {
 }
 
 function parsePositiveNumber(raw) {
-  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (raw === undefined || raw === null || typeof raw === "boolean") return undefined;
+  if (typeof raw === "string" && raw.trim() === "") return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+function parsePositiveInt(raw) {
+  const n = parsePositiveNumber(raw);
+  if (n === undefined) return undefined;
+  const floored = Math.floor(n);
+  return floored >= 1 ? floored : undefined;
+}
+
 function parseNonNegativeInt(raw) {
-  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (raw === undefined || raw === null || typeof raw === "boolean") return undefined;
+  if (typeof raw === "string" && raw.trim() === "") return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
 }
@@ -108,7 +117,7 @@ export function loadConfigFile(configPath = getConfigPath()) {
         path: resolved
       };
     }
-    const raw = fs.readFileSync(resolved, "utf8");
+    const raw = fs.readFileSync(resolved, "utf8").replace(/^\uFEFF/, "");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       const errMsg = "config.json root must be a JSON object";
@@ -185,12 +194,8 @@ export function getConfigSnapshot(options = {}) {
   pick("diffRead", diffEnv, cfgBool("diffRead"));
   pick(
     "diffReadMaxTurns",
-    parsePositiveNumber(env?.AGY_DART_DIFF_READ_MAX_TURNS) !== undefined
-      ? Math.floor(Number(env.AGY_DART_DIFF_READ_MAX_TURNS))
-      : undefined,
-    parsePositiveNumber(cfg.diffReadMaxTurns) !== undefined
-      ? Math.floor(Number(cfg.diffReadMaxTurns))
-      : undefined
+    parsePositiveInt(env?.AGY_DART_DIFF_READ_MAX_TURNS),
+    parsePositiveInt(cfg.diffReadMaxTurns)
   );
   pick(
     "diffReadMaxAgeMs",
@@ -204,21 +209,13 @@ export function getConfigSnapshot(options = {}) {
   );
   pick(
     "maxLineRange",
-    parsePositiveNumber(env?.CONTEXT_MODE_MAX_LINE_RANGE) !== undefined
-      ? Math.floor(Number(env.CONTEXT_MODE_MAX_LINE_RANGE))
-      : undefined,
-    parsePositiveNumber(cfg.maxLineRange) !== undefined
-      ? Math.floor(Number(cfg.maxLineRange))
-      : undefined
+    parsePositiveInt(env?.CONTEXT_MODE_MAX_LINE_RANGE),
+    parsePositiveInt(cfg.maxLineRange)
   );
   pick(
     "maxOutputBytes",
-    parsePositiveNumber(env?.CONTEXT_MODE_MAX_OUTPUT_BYTES) !== undefined
-      ? Math.floor(Number(env.CONTEXT_MODE_MAX_OUTPUT_BYTES))
-      : undefined,
-    parsePositiveNumber(cfg.maxOutputBytes) !== undefined
-      ? Math.floor(Number(cfg.maxOutputBytes))
-      : undefined
+    parsePositiveInt(env?.CONTEXT_MODE_MAX_OUTPUT_BYTES),
+    parsePositiveInt(cfg.maxOutputBytes)
   );
 
   // 4. CLI filter & fast MCP caches

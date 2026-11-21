@@ -52,7 +52,7 @@ export class CheckpointMethods {
           const displayPath = worktree
             ? (() => {
                 const rel = path.relative(worktree, rawPath);
-                if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+                if (rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel)) {
                   return rel.replace(/\\/g, "/");
                 }
                 return rawPath.replace(/\\/g, "/");
@@ -113,12 +113,20 @@ export class CheckpointMethods {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
     const isBuild = kind === "build";
-    const ok = passed !== null && passed !== undefined ? Boolean(passed) : Number(exitCode) === 0;
+    const parsedExitCode =
+      exitCode !== null &&
+      exitCode !== undefined &&
+      typeof exitCode !== "boolean" &&
+      String(exitCode).trim() !== "" &&
+      Number.isFinite(Number(exitCode))
+        ? Number(exitCode)
+        : null;
+    const ok = passed !== null && passed !== undefined ? Boolean(passed) : parsedExitCode === 0;
     const payload = JSON.stringify({
       command: String(command || "").trim().slice(0, 140),
       ruleId: String(ruleId || ""),
       ok,
-      exitCode: Number.isFinite(Number(exitCode)) ? Number(exitCode) : ok ? 0 : 1,
+      exitCode: parsedExitCode,
       summary: String(summary || "").trim().slice(0, 220),
       sourceId: sourceId || null,
       at: nowIso
@@ -240,18 +248,20 @@ export class CheckpointMethods {
     const sha = String(headSha || "nogit");
     const k = String(kind || "hotspots");
     const now = Date.now();
-    this.db
-      .prepare("DELETE FROM repo_cache WHERE workspace_dir = ? AND kind = ? AND head_sha != ?")
-      .run(normDir, k, sha);
-    this.db
-      .prepare(`
-        INSERT INTO repo_cache (workspace_dir, head_sha, kind, payload, updated_ts)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(workspace_dir, head_sha, kind) DO UPDATE SET
-          payload = excluded.payload,
-          updated_ts = excluded.updated_ts
-      `)
-      .run(normDir, sha, k, String(payload ?? ""), now);
+    this._withWriteTx(() => {
+      this.db
+        .prepare("DELETE FROM repo_cache WHERE workspace_dir = ? AND kind = ? AND head_sha != ?")
+        .run(normDir, k, sha);
+      this.db
+        .prepare(`
+          INSERT INTO repo_cache (workspace_dir, head_sha, kind, payload, updated_ts)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(workspace_dir, head_sha, kind) DO UPDATE SET
+            payload = excluded.payload,
+            updated_ts = excluded.updated_ts
+        `)
+        .run(normDir, sha, k, String(payload ?? ""), now);
+    });
   }
 
   /**
@@ -321,7 +331,7 @@ export class CheckpointMethods {
         ? Math.floor(options.maxEntries)
         : MAX_OUTLINE_CACHE_DB_ENTRIES;
 
-    this._withBusyRetry(() => {
+    this._withWriteTx(() => {
       this.db
         .prepare(`
           INSERT INTO outline_cache (file_path, mtime_ms, file_size, line_count, symbols_json, updated_ts)

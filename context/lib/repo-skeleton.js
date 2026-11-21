@@ -90,12 +90,15 @@ function compareAscii(a, b) {
 
 function isWithinWorkspace(targetPath, workspaceDir) {
   const rel = path.relative(workspaceDir, targetPath);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return (
+    rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel))
+  );
 }
 
 function toWorkspaceRel(targetPath, workspaceDir) {
   const rel = path.relative(workspaceDir, targetPath).replace(/\\/g, "/");
-  if (!rel || rel === "." || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  if (!rel || rel === "." || rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) return null;
   return rel;
 }
 
@@ -237,7 +240,7 @@ export function collectSourceFiles(workspaceDir, maxFiles = 120, maxDepth = 8) {
  * Strip // and /* *\/ comments while preserving string literals verbatim.
  * Safe for JSONC (preserves `"@/*"`), Go (including backtick raw strings), Java, and Dart.
  */
-function stripCLikeComments(content, { allowSingleQuotes = true, allowBackticks = false } = {}) {
+function stripCLikeComments(content, { allowSingleQuotes = true, allowBackticks = false, backtickEscapes = false } = {}) {
   let out = "";
   let i = 0;
   const len = content.length;
@@ -281,7 +284,7 @@ function stripCLikeComments(content, { allowSingleQuotes = true, allowBackticks 
       continue;
     }
 
-    // Backtick raw string literal (Go: no backslash escapes)
+    // Backtick literal (JS template literals escape '\', Go raw strings do not)
     if (allowBackticks && ch === "`") {
       out += ch;
       i++;
@@ -289,7 +292,12 @@ function stripCLikeComments(content, { allowSingleQuotes = true, allowBackticks 
         const c = content[i];
         out += c;
         i++;
-        if (c === "`") break;
+        if (backtickEscapes && c === "\\" && i < len) {
+          out += content[i];
+          i++;
+        } else if (c === "`") {
+          break;
+        }
       }
       continue;
     }
@@ -362,7 +370,8 @@ function stripTrailingJsonCommas(text) {
 
 function parseJsonc(rawText) {
   try {
-    const noComments = stripCLikeComments(rawText, { allowSingleQuotes: false, allowBackticks: false });
+    const text = String(rawText ?? "").replace(/^\uFEFF/, "");
+    const noComments = stripCLikeComments(text, { allowSingleQuotes: false, allowBackticks: false });
     const cleaned = stripTrailingJsonCommas(noComments);
     return JSON.parse(cleaned);
   } catch {
@@ -371,10 +380,12 @@ function parseJsonc(rawText) {
 }
 
 function stripJsComments(content) {
-  // Strip block comments and full-line / trailing '//' comments (preserving '://' URLs inside strings)
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:\\])\/\/[^\r\n]*/gm, "$1");
+  // String-aware comment stripping so '/*' or '//' inside string/template literals never eats subsequent imports
+  return stripCLikeComments(content, {
+    allowSingleQuotes: true,
+    allowBackticks: true,
+    backtickEscapes: true
+  });
 }
 
 function extractSfcScripts(content) {
@@ -460,10 +471,24 @@ function extractJavaImports(content) {
 function extractImports(content, ext) {
   const targets = [];
   if (ext === ".py") {
-    const pyRe = /^\s*from\s+(\.[A-Za-z0-9_.]*)\s+import\b/gm;
+    const pyRe = /^\s*from\s+(\.[A-Za-z0-9_.]*)\s+import\s+(\([\s\S]{0,1200}?\)|[^\r\n#]+)/gm;
     let m;
     while ((m = pyRe.exec(content)) !== null) {
-      targets.push(m[1]);
+      const mod = m[1];
+      if (/^\.+$/.test(mod)) {
+        const namesRaw = m[2].replace(/[()]/g, "");
+        const names = namesRaw
+          .split(",")
+          .map((part) => part.trim().split(/\s+as\s+/i)[0].trim())
+          .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+        if (names.length > 0) {
+          for (const n of names) targets.push(`${mod}${n}`);
+        } else {
+          targets.push(mod);
+        }
+      } else {
+        targets.push(mod);
+      }
     }
     return targets;
   }
@@ -793,7 +818,7 @@ function resolveTsAlias(spec, rules, workspaceDir, fileSet) {
     if (!spec.startsWith(rule.prefix) || !spec.endsWith(rule.suffix)) continue;
     const wildcardMatch = spec.slice(rule.prefix.length, spec.length - rule.suffix.length);
     for (const target of rule.targets) {
-      const expanded = target.includes("*") ? target.replace("*", wildcardMatch) : target;
+      const expanded = target.includes("*") ? target.replace("*", () => wildcardMatch) : target;
       const hit = resolveJsCandidates(path.resolve(rule.baseDir, expanded), expanded, workspaceDir, fileSet);
       if (hit) return hit;
     }
@@ -810,10 +835,9 @@ function resolveImportTarget(fromFile, selfRel, spec, workspaceDir, fileSet, ctx
     const rest = spec.slice(dots).replace(/\./g, "/");
     let base = fromDir;
     for (let i = 1; i < dots; i++) base = path.dirname(base);
-    const candidates = [
-      path.resolve(base, `${rest}.py`),
-      path.resolve(base, rest, "__init__.py")
-    ];
+    const candidates = rest
+      ? [path.resolve(base, `${rest}.py`), path.resolve(base, rest, "__init__.py")]
+      : [path.resolve(base, "__init__.py")];
     for (const c of candidates) {
       const rel = toWorkspaceRel(c, workspaceDir);
       if (rel && fileSet.has(rel)) return rel;

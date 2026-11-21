@@ -324,7 +324,12 @@ function analyzeArray(arr, maxSchemaKeys = 24) {
       const notes = [];
       if (info.nulls > 0) notes.push(`null:${info.nulls}`);
       if (missing > 0) notes.push(`missing:${missing}`);
-      schema[k] = notes.length > 0 ? `${typeStr} (${notes.join(", ")})` : typeStr;
+      const val = notes.length > 0 ? `${typeStr} (${notes.join(", ")})` : typeStr;
+      if (k === "__proto__") {
+        Object.defineProperty(schema, k, { value: val, enumerable: true, writable: true, configurable: true });
+      } else {
+        schema[k] = val;
+      }
     }
     const omittedKeys = sortedFields.length - shown.length + extraKeyCount;
     if (omittedKeys > 0) {
@@ -457,6 +462,19 @@ function estimateQuickBytes(val, limit) {
   return acc;
 }
 
+function setOwnSafeProp(obj, key, value) {
+  if (key === "__proto__") {
+    Object.defineProperty(obj, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+  } else {
+    obj[key] = value;
+  }
+}
+
 function compactObject(obj, opts, depth) {
   const keys = Object.keys(obj);
   const maxKeys = depth === 0 ? opts.maxTopKeys : opts.maxObjKeys;
@@ -465,7 +483,7 @@ function compactObject(obj, opts, depth) {
   if (keys.length <= maxKeys) {
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i];
-      out[k] = compactValue(obj[k], opts, depth + 1);
+      setOwnSafeProp(out, k, compactValue(obj[k], opts, depth + 1));
     }
     return out;
   }
@@ -504,7 +522,7 @@ function compactObject(obj, opts, depth) {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     if (selected.has(k)) {
-      out[k] = compactValue(obj[k], opts, depth + 1);
+      setOwnSafeProp(out, k, compactValue(obj[k], opts, depth + 1));
     }
   }
   const omitted = keys.length - selected.size;
@@ -557,8 +575,8 @@ function buildCrushedArrayNode(arr, opts, depth, isRoot) {
     opts.stats.totalItems = total;
     opts.stats.keptHead = head.length;
     opts.stats.keptTail = tail.length;
-    opts.stats.keptAnomalies = anomalies.length;
-    opts.stats.totalAnomalies = totalAnomalies;
+    opts.stats.keptAnomalies += anomalies.length;
+    opts.stats.totalAnomalies += totalAnomalies;
   } else {
     opts.stats.totalAnomalies += totalAnomalies;
     opts.stats.keptAnomalies += anomalies.length;
@@ -635,8 +653,8 @@ function buildCrushedRoot(parsed, rawBytes, profile, hint) {
       ...(hint ? { hint } : {})
     };
     payload = {
-      _crushed: meta,
-      ...compacted
+      ...compacted,
+      _crushed: meta
     };
   }
 
@@ -816,9 +834,15 @@ export function smartCrushJson(
         : { topLevelKeys: Object.keys(parsed.data).length }),
       ...(sourceId ? { sourceId } : {})
     };
-    let minimalText = JSON.stringify(minimalObj);
-    if (utf8Bytes(minimalText) > effectiveMaxBytes) {
-      minimalText = truncateUtf8Safe(minimalText, effectiveMaxBytes);
+    const fallbackCandidates = [
+      JSON.stringify(minimalObj),
+      JSON.stringify({ _crushed: true, rawBytes }),
+      JSON.stringify({ _crushed: true }),
+      "{}"
+    ];
+    let minimalText = fallbackCandidates.find((c) => utf8Bytes(c) <= effectiveMaxBytes);
+    if (minimalText === undefined) {
+      minimalText = effectiveMaxBytes >= 1 ? "0" : "";
     }
     chosen = {
       text: minimalText,

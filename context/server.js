@@ -194,6 +194,11 @@ rl.on("line", async (line) => {
     return;
   }
 
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+    sendError(null, -32600, "Invalid Request", "JSON-RPC message must be a JSON object");
+    return;
+  }
+
   const { id, method, params } = msg;
   if (id === undefined || id === null) return;
 
@@ -229,23 +234,29 @@ rl.on("line", async (line) => {
         const toolArgs = params?.arguments || {};
         // Strictly per-call session isolation via AsyncLocalStorage: never mutate process-global
         // session state across concurrent conversations sharing one long-lived MCP stdio server.
-        const callSessionId = normalizeCallSessionId(
-          toolArgs.sessionId ??
-            toolArgs.conversationId ??
-            params?._meta?.rootConversationId ??
-            params?._meta?.conversationId ??
-            params?._meta?.sessionId ??
+        const callSessionId =
+          [
+            toolArgs.sessionId,
+            toolArgs.conversationId,
+            params?._meta?.rootConversationId,
+            params?._meta?.conversationId,
+            params?._meta?.sessionId,
             params?.sessionId
-        );
-        const callDirectConvId = normalizeCallSessionId(
-          toolArgs.conversationId ??
-            toolArgs.sessionId ??
-            params?._meta?.conversationId ??
-            params?._meta?.sessionId ??
+          ]
+            .map(normalizeCallSessionId)
+            .find(Boolean) ?? null;
+        const callDirectConvId =
+          [
+            toolArgs.conversationId,
+            toolArgs.sessionId,
+            params?._meta?.conversationId,
+            params?._meta?.sessionId,
             params?.sessionId
-        );
+          ]
+            .map(normalizeCallSessionId)
+            .find(Boolean) ?? null;
 
-        if (!tools[toolName]) {
+        if (typeof toolName !== "string" || !Object.hasOwn(tools, toolName)) {
           sendError(id, -32601, `Unknown tool: ${toolName}`);
           break;
         }

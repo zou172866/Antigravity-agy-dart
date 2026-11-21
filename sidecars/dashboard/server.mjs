@@ -85,18 +85,18 @@ export function isAllowedOriginHeader(originHeader, hostHeader = null) {
   if (typeof originHeader !== "string") return false;
   const trimmed = originHeader.trim();
   if (!LOCAL_ORIGIN_RE.test(trimmed)) return false;
-  if (typeof hostHeader === "string" && hostHeader.trim()) {
-    try {
-      const originUrl = new URL(trimmed);
+  try {
+    const originUrl = new URL(trimmed);
+    if (originUrl.protocol !== "http:") return false;
+    if (typeof hostHeader === "string" && hostHeader.trim()) {
       const reqHostUrl = new URL(`http://${hostHeader.trim()}`);
-      if (originUrl.protocol !== "http:") return false;
       if (originUrl.hostname.toLowerCase() !== reqHostUrl.hostname.toLowerCase()) return false;
       const originPort = originUrl.port || "80";
       const hostPort = reqHostUrl.port || "80";
       if (originPort !== hostPort) return false;
-    } catch {
-      return false;
     }
+  } catch {
+    return false;
   }
   return true;
 }
@@ -130,6 +130,7 @@ export function readBoundedJsonBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
     if (rawContentLen !== undefined) {
       const declaredLen = Number(rawContentLen);
       if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+        req.on("error", () => {});
         req.resume();
         resolve({ ok: false, status: 413, error: `Request body exceeds ${Math.round(maxBytes / 1024)} KB limit` });
         return;
@@ -211,9 +212,63 @@ function getRenderedHtml(csrfToken = SIDECAR_CSRF_TOKEN) {
   return withVer.includes("</head>") ? withVer.replace("</head>", tokenMeta) : withVer;
 }
 
+const MAX_SEARCH_QUERIES = 20;
+const MAX_SEARCH_QUERY_CHARS = 256;
+
+function isUncPath(p) {
+  return typeof p === "string" && /^[\\/]{2}/.test(p.trim());
+}
+
+function validateStringFields(data, fields) {
+  if (!data || typeof data !== "object") return { ok: true };
+  for (const field of fields) {
+    const val = data[field];
+    if (val !== undefined && val !== null && typeof val !== "string") {
+      return { ok: false, error: `Field '${field}' must be a string` };
+    }
+  }
+  return { ok: true };
+}
+
+function validateAndNormalizeSearchInput(data) {
+  if (!data || typeof data !== "object") {
+    return { ok: false, error: "Request body must be a JSON object" };
+  }
+  if (data.queries !== undefined) {
+    if (!Array.isArray(data.queries)) {
+      return { ok: false, error: "Field 'queries' must be an array of strings" };
+    }
+    if (data.queries.length > MAX_SEARCH_QUERIES) {
+      return { ok: false, error: `At most ${MAX_SEARCH_QUERIES} search queries are allowed per request` };
+    }
+    const queries = [];
+    for (const q of data.queries) {
+      if (typeof q !== "string") {
+        return { ok: false, error: "Each item in 'queries' must be a string" };
+      }
+      queries.push(q.slice(0, MAX_SEARCH_QUERY_CHARS));
+    }
+    return { ok: true, queries };
+  }
+  if (data.query !== undefined && data.query !== null && typeof data.query !== "string") {
+    return { ok: false, error: "Field 'query' must be a string" };
+  }
+  return { ok: true, queries: [typeof data.query === "string" ? data.query.slice(0, MAX_SEARCH_QUERY_CHARS) : ""] };
+}
+
 function resolveTargetSession(data, defaultConvId = "default") {
-  const scope = data.scope || (data.sessionId === "all" ? "lifetime" : (data.sessionId === "app" ? "app" : "conversation"));
-  const convId = data.conversationId || (data.sessionId !== "all" && data.sessionId !== "app" && data.sessionId ? data.sessionId : (defaultConvId || "default"));
+  const safeSessionId = typeof data?.sessionId === "string" ? data.sessionId : "";
+  const safeConvId = typeof data?.conversationId === "string" ? data.conversationId : "";
+  const rawScope = typeof data?.scope === "string" && data.scope.trim() ? data.scope.trim() : "";
+  const scope =
+    rawScope === "all"
+      ? "lifetime"
+      : rawScope === "session"
+        ? "app"
+        : rawScope || (safeSessionId === "all" ? "lifetime" : safeSessionId === "app" ? "app" : "conversation");
+  const convId =
+    safeConvId ||
+    (safeSessionId && safeSessionId !== "all" && safeSessionId !== "app" ? safeSessionId : defaultConvId || "default");
   let targetSid = convId;
   if (scope === "lifetime" || scope === "all") targetSid = "all";
   else if (scope === "app" || scope === "session") targetSid = "app";
@@ -224,10 +279,12 @@ function getStatsPayload(data, defaultConvId = "default") {
   const store = getRuntimeStore();
   const appStartTime = getAppStartTime();
   const { scope, convId, targetSid } = resolveTargetSession(data, defaultConvId);
+  const isLifetimeScope = scope === "lifetime" || scope === "all";
+  const isAppScope = scope === "app" || scope === "session";
   let stats;
-  if (scope === "lifetime" || scope === "all") {
+  if (isLifetimeScope) {
     stats = store.getStats("all");
-  } else if (scope === "app" || scope === "session") {
+  } else if (isAppScope) {
     stats = store.getStats("app", { sinceTs: appStartTime });
   } else {
     stats = store.getStats(convId);
@@ -241,31 +298,31 @@ function getStatsPayload(data, defaultConvId = "default") {
   stats.globalCutoffBytes = store.getCutoff(null);
   stats.hasConversationCutoffOverride = store.hasCutoffOverride(convId);
   stats.hasAppCutoffOverride = store.hasCutoffOverride("app");
-  stats.cutoffBytes = scope === "lifetime"
+  stats.cutoffBytes = isLifetimeScope
     ? stats.globalCutoffBytes
-    : (scope === "app" ? stats.appCutoffBytes : stats.conversationCutoffBytes);
+    : (isAppScope ? stats.appCutoffBytes : stats.conversationCutoffBytes);
 
   stats.conversationExemptExtensions = store.getExemptExtensions(convId);
   stats.appExemptExtensions = store.getExemptExtensions("app");
   stats.globalExemptExtensions = store.getExemptExtensions(null);
-  stats.exemptExtensions = scope === "lifetime"
+  stats.exemptExtensions = isLifetimeScope
     ? stats.globalExemptExtensions
-    : (scope === "app" ? stats.appExemptExtensions : stats.conversationExemptExtensions);
+    : (isAppScope ? stats.appExemptExtensions : stats.conversationExemptExtensions);
 
   stats.fileCategories = Object.values(FILE_CATEGORIES);
   stats.conversationExemptCategories = store.getExemptCategories(convId);
   stats.appExemptCategories = store.getExemptCategories("app");
   stats.globalExemptCategories = store.getExemptCategories(null);
-  stats.exemptCategories = scope === "lifetime"
+  stats.exemptCategories = isLifetimeScope
     ? stats.globalExemptCategories
-    : (scope === "app" ? stats.appExemptCategories : stats.conversationExemptCategories);
+    : (isAppScope ? stats.appExemptCategories : stats.conversationExemptCategories);
 
   stats.conversationCustomExtensions = store.getCustomExemptExtensions(convId);
   stats.appCustomExtensions = store.getCustomExemptExtensions("app");
   stats.globalCustomExtensions = store.getCustomExemptExtensions(null);
-  stats.customExtensions = scope === "lifetime"
+  stats.customExtensions = isLifetimeScope
     ? stats.globalCustomExtensions
-    : (scope === "app" ? stats.appCustomExtensions : stats.conversationCustomExtensions);
+    : (isAppScope ? stats.appCustomExtensions : stats.conversationCustomExtensions);
 
   // Sandbox preview cap is double cutoff, hard-capped at 8100 B to prevent Antigravity MCP output.txt spills
   const cfgMaxOutputBytes = getEffectiveConfig().maxOutputBytes || 8100;
@@ -497,7 +554,7 @@ function collectKnownWorktrees(store, sessionId = "default", sinceTs = null) {
     if (!store.db) return [];
     const sid = sessionId || "default";
     const isAll = sid === "all" || sid === "lifetime";
-    const isApp = sid === "app" && Number.isFinite(Number(sinceTs));
+    const isApp = sid === "app" && sinceTs !== null && sinceTs !== undefined && Number.isFinite(Number(sinceTs));
     const sinceNum = isApp ? Number(sinceTs) : null;
     const sinceIso = isApp ? new Date(sinceNum).toISOString() : null;
 
@@ -545,11 +602,11 @@ function collectKnownWorktrees(store, sessionId = "default", sinceTs = null) {
         for (const row of run() || []) {
           if (row?.worktree && typeof row.worktree === "string") {
             const raw = row.worktree.trim();
-            if (!raw || raw.includes("\0") || raw.startsWith("\\\\") || raw.startsWith("//") || !path.isAbsolute(raw)) {
+            if (!raw || raw.includes("\0") || isUncPath(raw) || !path.isAbsolute(raw)) {
               continue;
             }
             const resolved = path.resolve(raw);
-            if (!isUnsafeBroadRoot(resolved)) {
+            if (!isUncPath(resolved) && !isUnsafeBroadRoot(resolved)) {
               roots.add(resolved);
             }
           }
@@ -573,51 +630,82 @@ function isPathInsideRoot(candidatePath, rootPath) {
   const normCand = process.platform === "win32" ? candidatePath.toLowerCase() : candidatePath;
   const normRoot = process.platform === "win32" ? rootPath.toLowerCase() : rootPath;
   const rel = path.relative(normRoot, normCand);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return (
+    rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel))
+  );
+}
+
+function resolveCanonicalPath(p) {
+  const real = typeof fs.realpathSync.native === "function"
+    ? fs.realpathSync.native(p)
+    : fs.realpathSync(p);
+  if (process.platform === "win32") {
+    const driveMatch = real.match(/^\\\\\?\\([a-zA-Z]:\\.*)$/);
+    if (driveMatch) return driveMatch[1];
+  }
+  return real;
 }
 
 function isUnsafeBroadRoot(dirPath) {
+  if (isUncPath(dirPath)) return true;
   if (isFilesystemRoot(dirPath)) return true;
   const resolved = path.resolve(dirPath);
+  if (isUncPath(resolved)) return true;
+  let realResolved = resolved;
+  try {
+    realResolved = resolveCanonicalPath(resolved);
+    if (isUncPath(realResolved) || isFilesystemRoot(realResolved)) return true;
+  } catch {}
   const home = path.resolve(os.homedir());
   let realHome = home;
   try {
-    realHome = fs.realpathSync(home);
+    realHome = resolveCanonicalPath(home);
   } catch {}
-  // Reject os.homedir() itself and any ancestor directory of os.homedir() (e.g. C:\Users, /Users, /home)
-  return isPathInsideRoot(home, resolved) || isPathInsideRoot(realHome, resolved);
+  // Reject os.homedir() itself and any ancestor directory of os.homedir() (e.g. C:\Users, /Users, /home),
+  // including Windows 8.3 short-name aliases (e.g. C:\Users\ADMINI~1)
+  return (
+    isPathInsideRoot(home, resolved) ||
+    isPathInsideRoot(realHome, resolved) ||
+    isPathInsideRoot(home, realResolved) ||
+    isPathInsideRoot(realHome, realResolved)
+  );
 }
 
 /**
  * Strictly whitelist explicit `cwd` parameters for `/api/handoff` against known workspace roots
- * recorded in SQLite. Blocks UNC paths, relative paths, filesystem roots, home/ancestor directories,
- * arbitrary external directories, and symlink/junction escapes before touching the filesystem or spawning `git`.
+ * recorded in SQLite. Blocks UNC paths (including Windows mixed-slash UNC `/\host\share`), relative paths,
+ * filesystem roots, home/ancestor directories, arbitrary external directories, and symlink/junction escapes
+ * before touching the filesystem or spawning `git`.
  */
 export function resolveAllowedHandoffCwd(rawCwd, knownRoots = []) {
   if (typeof rawCwd !== "string") return "";
   const trimmed = rawCwd.trim();
   if (!trimmed || trimmed.includes("\0")) return "";
-  if (trimmed.startsWith("\\\\") || trimmed.startsWith("//")) return "";
+  if (isUncPath(trimmed)) return "";
   if (!path.isAbsolute(trimmed)) return "";
   const resolvedCandidate = path.resolve(trimmed);
-  if (isUnsafeBroadRoot(resolvedCandidate)) return "";
+  if (isUncPath(resolvedCandidate) || isUnsafeBroadRoot(resolvedCandidate)) return "";
 
   for (const rawRoot of knownRoots) {
     if (!rawRoot || typeof rawRoot !== "string") continue;
     const trimmedRoot = rawRoot.trim();
-    if (!trimmedRoot || trimmedRoot.includes("\0") || trimmedRoot.startsWith("\\\\") || trimmedRoot.startsWith("//")) {
+    if (!trimmedRoot || trimmedRoot.includes("\0") || isUncPath(trimmedRoot)) {
       continue;
     }
     if (!path.isAbsolute(trimmedRoot)) continue;
     const resolvedRoot = path.resolve(trimmedRoot);
-    if (isUnsafeBroadRoot(resolvedRoot)) continue;
-    if (!isPathInsideRoot(resolvedCandidate, resolvedRoot)) continue;
+    if (isUncPath(resolvedRoot) || isUnsafeBroadRoot(resolvedRoot)) continue;
+    const mayBeWinShortAlias =
+      process.platform === "win32" && (resolvedCandidate.includes("~") || resolvedRoot.includes("~"));
+    if (!isPathInsideRoot(resolvedCandidate, resolvedRoot) && !mayBeWinShortAlias) continue;
     try {
-      const realRoot = fs.realpathSync(resolvedRoot);
-      if (isUnsafeBroadRoot(realRoot)) continue;
-      const realCand = fs.realpathSync(resolvedCandidate);
-      if (isPathInsideRoot(realCand, realRoot) && fs.statSync(realCand).isDirectory()) {
-        return realCand;
+      const canonicalRoot = resolveCanonicalPath(resolvedRoot);
+      if (isUncPath(canonicalRoot) || isUnsafeBroadRoot(canonicalRoot)) continue;
+      const canonicalCand = resolveCanonicalPath(resolvedCandidate);
+      if (isUncPath(canonicalCand) || isUnsafeBroadRoot(canonicalCand)) continue;
+      if (isPathInsideRoot(canonicalCand, canonicalRoot) && fs.statSync(canonicalCand).isDirectory()) {
+        return fs.realpathSync(resolvedCandidate);
       }
     } catch {
       // Unresolvable or non-directory -> reject
@@ -637,8 +725,10 @@ function getResumePayload(data = {}, defaultConvId = "default") {
 
 function getSourceChunksPayload(data = {}) {
   const store = getRuntimeStore();
+  if (typeof data.sourceId !== "string" || !data.sourceId.trim()) {
+    return { ok: false, sourceId: null, chunks: [] };
+  }
   const sourceId = data.sourceId;
-  if (!sourceId) return { ok: false, sourceId: null, chunks: [] };
   return { ok: true, sourceId, chunks: store.getSourceChunks(sourceId) };
 }
 
@@ -938,6 +1028,11 @@ export function createStandaloneServer({
           }
           data = { ...data, ...parsed.data };
         }
+        const fieldCheck = validateStringFields(data, ["scope", "conversationId", "sessionId", "sourceId", "cwd"]);
+        if (!fieldCheck.ok) {
+          sendJson(res, 400, { error: fieldCheck.error });
+          return;
+        }
         if (url.pathname === "/api/stats") {
           sendJson(res, 200, getStatsPayload(data));
           return;
@@ -975,8 +1070,17 @@ export function createStandaloneServer({
           sendJson(res, parsed.status, { error: parsed.error }, parsed.status === 413 ? { Connection: "close" } : {});
           return;
         }
-        const queries = Array.isArray(parsed.data.queries) ? parsed.data.queries : [parsed.data.query || ""];
-        sendJson(res, 200, getRuntimeStore().search({ queries, limit: 5 }));
+        const searchCheck = validateAndNormalizeSearchInput(parsed.data);
+        if (!searchCheck.ok) {
+          sendJson(res, 400, { error: searchCheck.error });
+          return;
+        }
+        const searchFieldCheck = validateStringFields(parsed.data, ["sourceId", "conversationId", "sessionId", "scope"]);
+        if (!searchFieldCheck.ok) {
+          sendJson(res, 400, { error: searchFieldCheck.error });
+          return;
+        }
+        sendJson(res, 200, getRuntimeStore().search({ queries: searchCheck.queries, limit: 5 }));
         return;
       }
 
@@ -992,6 +1096,11 @@ export function createStandaloneServer({
           return;
         }
         const data = parsed.data;
+        const mutFieldCheck = validateStringFields(data, ["scope", "conversationId", "sessionId", "action", "category", "ext"]);
+        if (!mutFieldCheck.ok) {
+          sendJson(res, 400, { error: mutFieldCheck.error });
+          return;
+        }
         if (url.pathname === "/api/cutoff") {
           sendJson(res, 200, handleCutoffMutation(data));
         } else if (url.pathname === "/api/toggle-active" || url.pathname === "/api/paused") {
@@ -1022,15 +1131,18 @@ export function createStandaloneServer({
 
 if (isDirectRun) {
   let SidecarApp = null;
+  let SidecarResponse = null;
 
   try {
     const userSdkPath = path.join(os.homedir(), ".gemini", "config", "node_modules", "sidecar_sdk", "index.mjs");
     const sdkModule = await import(pathToFileURL(userSdkPath).href);
     SidecarApp = sdkModule.SidecarApp;
+    SidecarResponse = sdkModule.Response || null;
   } catch {
     try {
       const sdkModule = await import("sidecar_sdk");
       SidecarApp = sdkModule.SidecarApp;
+      SidecarResponse = sdkModule.Response || null;
     } catch {
       // Standalone fallback
     }
@@ -1056,31 +1168,98 @@ if (isDirectRun) {
     getRuntimeStore();
     const app = new SidecarApp();
 
+    const makeBadRequest = (error) =>
+      SidecarResponse
+        ? new SidecarResponse(JSON.stringify({ error }), { contentType: "application/json", status: 400 })
+        : { ok: false, error };
+
     app.page("/", () => {
-      return getRenderedHtml(SIDECAR_CSRF_TOKEN);
+      const html = getRenderedHtml(SIDECAR_CSRF_TOKEN);
+      if (SidecarResponse) {
+        return new SidecarResponse(html, {
+          contentType: "text/html; charset=utf-8",
+          status: 200,
+          headers: {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff"
+          }
+        });
+      }
+      return html;
     });
 
     // ALL /api/* routes are POST-only in SidecarApp mode because sidecar_sdk only enforces
     // X-Sidecar-Token validation for non-GET requests (blocks unauthenticated GET / DNS-rebinding reads).
-    app.api("/api/stats", (data) => getStatsPayload(data, app.config.conversationId), "POST");
+    app.api("/api/stats", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return getStatsPayload(data, app.config.conversationId);
+    }, "POST");
     app.api("/api/doctor", () => getRuntimeStore().doctor(), "POST");
-    app.api("/api/resume", (data) => getResumePayload(data, app.config.conversationId), "POST");
-    app.api("/api/source-chunks", (data) => getSourceChunksPayload(data), "POST");
-    app.api("/api/cache-diag", (data) => getCacheDiagPayload(data, app.config.conversationId), "POST");
-    app.api("/api/handoff", (data) => getHandoffPayload(data, app.config.conversationId), "POST");
+    app.api("/api/resume", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return getResumePayload(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/source-chunks", (data) => {
+      const check = validateStringFields(data, ["sourceId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return getSourceChunksPayload(data);
+    }, "POST");
+    app.api("/api/cache-diag", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return getCacheDiagPayload(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/handoff", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId", "cwd"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return getHandoffPayload(data, app.config.conversationId);
+    }, "POST");
 
     app.api("/api/search", (data) => {
-      const queries = Array.isArray(data.queries) ? data.queries : [data.query || ""];
-      return getRuntimeStore().search({ queries, limit: 5 });
+      const searchCheck = validateAndNormalizeSearchInput(data);
+      if (!searchCheck.ok) return makeBadRequest(searchCheck.error);
+      const fieldCheck = validateStringFields(data, ["sourceId", "conversationId", "sessionId", "scope"]);
+      if (!fieldCheck.ok) return makeBadRequest(fieldCheck.error);
+      return getRuntimeStore().search({ queries: searchCheck.queries, limit: 5 });
     }, "POST");
-    app.api("/api/cutoff", (data) => handleCutoffMutation(data, app.config.conversationId), "POST");
-    app.api("/api/exemptions", (data) => handleExemptionsMutation(data, app.config.conversationId), "POST");
-    app.api("/api/toggle-active", (data) => handleToggleActiveMutation(data, app.config.conversationId), "POST");
-    app.api("/api/paused", (data) => handleToggleActiveMutation(data, app.config.conversationId), "POST");
-    app.api("/api/purge", (data) => handlePurgeMutation(data, app.config.conversationId), "POST");
+    app.api("/api/cutoff", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleCutoffMutation(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/exemptions", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId", "action", "category", "ext"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleExemptionsMutation(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/toggle-active", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleToggleActiveMutation(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/paused", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleToggleActiveMutation(data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/purge", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handlePurgeMutation(data, app.config.conversationId);
+    }, "POST");
     app.api("/api/maintenance", (data) => handleMaintenanceMutation(data), "POST");
-    app.api("/api/cli-filter", (data) => handleFeatureToggleMutation(true, data, app.config.conversationId), "POST");
-    app.api("/api/read-dedup", (data) => handleFeatureToggleMutation(false, data, app.config.conversationId), "POST");
+    app.api("/api/cli-filter", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleFeatureToggleMutation(true, data, app.config.conversationId);
+    }, "POST");
+    app.api("/api/read-dedup", (data) => {
+      const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
+      if (!check.ok) return makeBadRequest(check.error);
+      return handleFeatureToggleMutation(false, data, app.config.conversationId);
+    }, "POST");
 
     await app.run();
     console.log(`[agy-dart sidecar] registered and running`);

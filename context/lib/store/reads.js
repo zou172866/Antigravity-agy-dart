@@ -135,18 +135,20 @@ export class ReadMethods {
   }
 
   /** Arm the 2-strike bypass flag on a matched file_reads entry so an immediate retry succeeds */
-  armReadBypass({ sessionId, filePath, startLine, endLine }) {
+  armReadBypass({ sessionId, filePath, startLine = 1, endLine = null }) {
     this.open();
     const sid = sessionId || "default";
     const norm = this._normalizeTrackPath(filePath);
     if (!norm) return;
+    const reqStart = Number.isFinite(startLine) && startLine > 0 ? Math.floor(startLine) : 1;
+    const reqEnd = Number.isFinite(endLine) && endLine > 0 ? Math.floor(endLine) : -1;
     this._withBusyRetry(() => {
       this.db
         .prepare(`
           UPDATE file_reads SET bypass_armed = 1
           WHERE session_id = ? AND file_path = ? AND start_line = ? AND end_line = ?
         `)
-        .run(sid, norm, startLine, endLine);
+        .run(sid, norm, reqStart, reqEnd);
     });
   }
 
@@ -173,7 +175,7 @@ export class ReadMethods {
     const normIno = ino !== null && ino !== undefined && String(ino) !== "" ? String(ino) : null;
     const now = Date.now();
 
-    this._withBusyRetry(() => {
+    this._withWriteTx(() => {
       // Evict stale versions of this file in this session
       if (hasCtime && normIno !== null) {
         this.db
@@ -247,7 +249,7 @@ export class ReadMethods {
   invalidateFileReads(sessionId, filePath = null) {
     this.open();
     const sid = sessionId || "default";
-    return this._withBusyRetry(() => {
+    return this._withWriteTx(() => {
       if (filePath) {
         const norm = this._normalizeTrackPath(filePath);
         if (!norm) return 0;
@@ -308,7 +310,7 @@ export class ReadMethods {
       ? Math.floor(maxSnapshotsPerSession)
       : MAX_SNAPSHOTS_PER_SESSION;
 
-    this._withBusyRetry(() => {
+    this._withWriteTx(() => {
       // Evict strictly covered older subset snapshots (same inode when known) so a newer superset read is never shadowed
       this.db
         .prepare(`
@@ -497,22 +499,24 @@ export class ReadMethods {
     const norm = this._normalizeTrackPath(filePath);
     if (!norm) return;
     const now = Date.now();
-    this.db
-      .prepare(`
-        INSERT INTO ghost_interceptions (session_id, file_path, file_size, cutoff_bytes, blocked_ts, recall_reads, recall_bytes)
-        VALUES (?, ?, ?, ?, ?, 0, 0)
-        ON CONFLICT(session_id, file_path) DO UPDATE SET
-          file_size = excluded.file_size,
-          cutoff_bytes = excluded.cutoff_bytes,
-          blocked_ts = excluded.blocked_ts
-      `)
-      .run(
-        sid,
-        norm,
-        Math.max(0, Math.round(Number(fileSize) || 0)),
-        Math.max(0, Math.round(Number(cutoffBytes) || 0)),
-        now
-      );
+    this._withBusyRetry(() => {
+      this.db
+        .prepare(`
+          INSERT INTO ghost_interceptions (session_id, file_path, file_size, cutoff_bytes, blocked_ts, recall_reads, recall_bytes)
+          VALUES (?, ?, ?, ?, ?, 0, 0)
+          ON CONFLICT(session_id, file_path) DO UPDATE SET
+            file_size = excluded.file_size,
+            cutoff_bytes = excluded.cutoff_bytes,
+            blocked_ts = excluded.blocked_ts
+        `)
+        .run(
+          sid,
+          norm,
+          Math.max(0, Math.round(Number(fileSize) || 0)),
+          Math.max(0, Math.round(Number(cutoffBytes) || 0)),
+          now
+        );
+    });
   }
 
   /** Check if a file has an active Ghost Registry interception row for this session */
@@ -534,14 +538,16 @@ export class ReadMethods {
     const norm = this._normalizeTrackPath(filePath);
     if (!norm) return 0;
     const addBytes = Math.max(0, Math.round(Number(bytesRead) || 0));
-    const res = this.db
-      .prepare(`
-        UPDATE ghost_interceptions
-        SET recall_reads = recall_reads + 1,
-            recall_bytes = recall_bytes + ?
-        WHERE session_id = ? AND file_path = ?
-      `)
-      .run(addBytes, sid, norm);
+    const res = this._withBusyRetry(() =>
+      this.db
+        .prepare(`
+          UPDATE ghost_interceptions
+          SET recall_reads = recall_reads + 1,
+              recall_bytes = recall_bytes + ?
+          WHERE session_id = ? AND file_path = ?
+        `)
+        .run(addBytes, sid, norm)
+    );
     return res.changes || 0;
   }
 

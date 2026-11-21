@@ -1478,7 +1478,7 @@
       </div>
 
       <div class="input-row">
-        <input id="search-input" type="text" class="text-input" data-i18n-placeholder="searchPlaceholder" placeholder="Search indexed files, code, data, error patterns, symbols..." onkeydown="if(event.key==='Enter') executeSearch()" />
+        <input id="search-input" type="text" class="text-input" data-i18n-placeholder="searchPlaceholder" placeholder="Search indexed files, code, data, error patterns, symbols..." onkeydown="if(event.key==='Enter' && !event.isComposing) executeSearch()" />
         <button onclick="executeSearch()" class="btn btn-primary" data-i18n="searchBtn">Search</button>
       </div>
 
@@ -1539,7 +1539,7 @@
             <span class="muted-note" data-i18n="loadingCustomExt">Loading custom extensions...</span>
           </div>
           <div class="input-row">
-            <input id="new-exempt-input" type="text" class="text-input" data-i18n-placeholder="customExtPlaceholder" placeholder="Add custom extension (e.g. .csv, .parquet, .log)..." onkeydown="if(event.key==='Enter') addExemption()" />
+            <input id="new-exempt-input" type="text" class="text-input" data-i18n-placeholder="customExtPlaceholder" placeholder="Add custom extension (e.g. .csv, .parquet, .log)..." onkeydown="if(event.key==='Enter' && !event.isComposing) addExemption()" />
             <button onclick="addExemption()" class="btn btn-secondary" data-i18n="addBtn">+ Add</button>
           </div>
         </div>
@@ -2161,6 +2161,7 @@
     let lastHandoffMarkdown = '';
     let handoffCopyResetTimer = null;
     let handoffFetchSeq = 0;
+    let refreshSeq = 0;
 
     function t(key, vars) {
       const dict = I18N[currentLang] || I18N.en;
@@ -2393,10 +2394,10 @@
     }
 
     async function toggleActiveState() {
+      const prevPaused = isProtectionPaused;
+      const nextPaused = !prevPaused;
+      updateActiveBadge(nextPaused);
       try {
-        const nextPaused = !isProtectionPaused;
-        updateActiveBadge(nextPaused);
-
         const params = new URLSearchParams(window.location.search);
         const convId = window.sidecar?.conversationId || params.get('conversationId') || '';
 
@@ -2405,15 +2406,14 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ scope: currentScope, conversationId: convId, paused: nextPaused })
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.isPaused !== undefined) {
-            updateActiveBadge(data.isPaused);
-          }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data && data.isPaused !== undefined) {
+          updateActiveBadge(data.isPaused);
         }
       } catch (e) {
         console.error('Failed to toggle active state', e);
-        updateActiveBadge(isProtectionPaused);
+        updateActiveBadge(prevPaused);
       }
     }
 
@@ -2497,11 +2497,7 @@
       if (body !== undefined) fetchOpts.body = body;
 
       if (window.sidecar && typeof window.sidecar.fetch === 'function') {
-        try {
-          return await window.sidecar.fetch(finalUrl, fetchOpts);
-        } catch (e) {
-          // Fall through to native fetch
-        }
+        return window.sidecar.fetch(finalUrl, fetchOpts);
       }
       return fetch(finalUrl, fetchOpts);
     }
@@ -2529,6 +2525,7 @@
       if (!matched) {
         cutoffSelect.value = targetVal === '0' ? '0' : '16384';
       }
+      if (cutoffSelect.dataset) cutoffSelect.dataset.lastConfirmedCutoff = cutoffSelect.value;
 
       const gateReadCutoff = document.getElementById('gate-read-cutoff');
       if (gateReadCutoff) {
@@ -2542,12 +2539,14 @@
     }
 
     async function changeCutoff(newVal) {
+      const cutoffSelect = document.getElementById('cutoff-select');
+      const prevSelectVal = cutoffSelect ? (cutoffSelect.dataset?.lastConfirmedCutoff ?? '16384') : null;
+      const prevStatsSnapshot = cachedStats ? { ...cachedStats } : null;
       try {
         const params = new URLSearchParams(window.location.search);
         const convId = window.sidecar?.conversationId || params.get('conversationId') || '';
         const cutoffBytes = newVal === '0' || newVal === 0 ? 0 : parseInt(newVal, 10);
 
-        const cutoffSelect = document.getElementById('cutoff-select');
         if (cutoffSelect) cutoffSelect.value = String(cutoffBytes);
         const gateReadCutoff = document.getElementById('gate-read-cutoff');
         if (gateReadCutoff) {
@@ -2588,9 +2587,18 @@
           if (respData.appCutoffBytes !== undefined) cachedStats.appCutoffBytes = respData.appCutoffBytes;
           if (respData.conversationCutoffBytes !== undefined) cachedStats.conversationCutoffBytes = respData.conversationCutoffBytes;
         }
+        if (cutoffSelect && cutoffSelect.dataset) cutoffSelect.dataset.lastConfirmedCutoff = cutoffSelect.value;
         refreshData(true);
       } catch (err) {
         console.error("Failed to update cutoff:", err);
+        cachedStats = prevStatsSnapshot;
+        if (cachedStats) {
+          updateCutoffDropdown(cachedStats);
+        } else if (cutoffSelect && prevSelectVal !== null) {
+          cutoffSelect.value = prevSelectVal;
+          const restoredBytes = prevSelectVal === '0' ? 0 : (parseInt(prevSelectVal, 10) || 16384);
+          updateCutoffDropdown({ cutoffBytes: restoredBytes, appCutoffBytes: restoredBytes, globalCutoffBytes: restoredBytes, conversationCutoffBytes: restoredBytes });
+        }
       }
     }
 
@@ -2705,6 +2713,7 @@
       if (!cachedStats) cachedStats = {};
       const activeCats = getActiveCategories(cachedStats);
       const isCurrentlyActive = activeCats.includes(categoryId);
+      const nextEnabled = !isCurrentlyActive;
       const nextActive = isCurrentlyActive
         ? activeCats.filter(c => c !== categoryId)
         : [...activeCats, categoryId];
@@ -2718,14 +2727,13 @@
         const res = await apiFetch('/api/exemptions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'toggleCategory', category: categoryId, scope: currentScope, conversationId: convId })
+          body: JSON.stringify({ action: 'toggleCategory', category: categoryId, enabled: nextEnabled, scope: currentScope, conversationId: convId })
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.exemptCategories) {
-            setActiveCategories(cachedStats, data.exemptCategories);
-            updateExemptionsList(cachedStats);
-          }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data && data.exemptCategories) {
+          setActiveCategories(cachedStats, data.exemptCategories);
+          updateExemptionsList(cachedStats);
         }
       } catch (err) {
         console.error("Failed to toggle category:", err);
@@ -2849,7 +2857,9 @@
         for (const src of r.recentSources) {
           const safeId = escapeHtml(src.id);
           const safeLabel = escapeHtml(src.label);
-          const chunkWord = src.chunk_count === 1 ? t('chunkOne') : t('chunkMany');
+          const chunkCount = Number(src.chunk_count) || 0;
+          const bytesTotal = Number(src.bytes_total) || 0;
+          const chunkWord = chunkCount === 1 ? t('chunkOne') : t('chunkMany');
           items.push(`
             <div data-source-id="${safeId}" data-source-label="${safeLabel}" onclick="inspectSourceEl(this)"
                  class="source-row is-clickable"
@@ -2859,8 +2869,8 @@
                 <span class="truncate">${safeLabel}</span>
               </div>
               <div class="source-right">
-                <span>${formatBytes(src.bytes_total)}</span>
-                <span class="muted-note">(${src.chunk_count} ${escapeHtml(chunkWord)})</span>
+                <span>${formatBytes(bytesTotal)}</span>
+                <span class="muted-note">(${chunkCount} ${escapeHtml(chunkWord)})</span>
                 <svg class="btn-icon muted-note" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
@@ -2878,6 +2888,9 @@
     }
 
     async function refreshData(manual = false) {
+      const reqSeq = ++refreshSeq;
+      const reqScope = currentScope;
+      const isStale = () => reqSeq !== refreshSeq || currentScope !== reqScope;
       const refreshIcon = document.getElementById('refresh-icon');
       if (manual && refreshIcon) refreshIcon.classList.add('spinning');
 
@@ -2888,10 +2901,11 @@
 
         const statsRes = await apiFetch('/api/stats', {
           method: 'POST',
-          body: JSON.stringify({ scope: currentScope, conversationId: convId })
+          body: JSON.stringify({ scope: reqScope, conversationId: convId })
         });
         if (!statsRes.ok) throw new Error(`Stats HTTP ${statsRes.status}`);
         const s = await statsRes.json();
+        if (isStale()) return;
         cachedStats = s;
 
         updateCutoffDropdown(s);
@@ -2903,7 +2917,7 @@
         updateFeaturePill('toggle-read-dedup-btn', t('readDedupLabel'), s.readDedupEnabled !== false);
         if (s.breakdown) {
           const cdEl = document.getElementById('cli-dedup-counts');
-          if (cdEl) cdEl.innerText = `${s.breakdown.cliFilters || 0} / ${s.breakdown.dedups || 0}`;
+          if (cdEl) cdEl.innerText = `${Number(s.breakdown.cliFilters) || 0} / ${Number(s.breakdown.dedups) || 0}`;
         }
         renderGhostEfficiency(s.ghost);
         if (s.version) {
@@ -2952,8 +2966,10 @@
 
         try {
           const docRes = await apiFetch('/api/doctor', { method: 'POST', body: '{}' });
+          if (isStale()) return;
           if (docRes.ok) {
             const d = await docRes.json();
+            if (isStale()) return;
             cachedDoctor = d;
             if (d.status) {
               document.getElementById('doctor-status').innerText = d.status === 'HEALTHY' ? t('statusHealthy') : d.status;
@@ -2969,10 +2985,12 @@
         try {
           const kvRes = await apiFetch('/api/cache-diag', {
             method: 'POST',
-            body: JSON.stringify({ scope: currentScope, conversationId: convId })
+            body: JSON.stringify({ scope: reqScope, conversationId: convId })
           });
+          if (isStale()) return;
           if (kvRes.ok) {
             const kv = await kvRes.json();
+            if (isStale()) return;
             cachedKv = kv;
             renderKvCacheCard(kv);
           }
@@ -2980,10 +2998,12 @@
 
         const resumeRes = await apiFetch('/api/resume', {
           method: 'POST',
-          body: JSON.stringify({ scope: currentScope, conversationId: convId })
+          body: JSON.stringify({ scope: reqScope, conversationId: convId })
         });
+        if (isStale()) return;
         if (resumeRes.ok) {
           const r = await resumeRes.json();
+          if (isStale()) return;
           cachedResume = r;
           renderRecentSourcesAndEvents(r);
         }
@@ -2993,11 +3013,12 @@
         renderTelemetryBanner();
 
       } catch (err) {
+        if (isStale()) return;
         console.error("Telemetry refresh failed:", err);
         cachedDisconnectedErr = err.message;
         renderTelemetryBanner();
       } finally {
-        if (refreshIcon) {
+        if (refreshIcon && reqSeq === refreshSeq) {
           setTimeout(() => refreshIcon.classList.remove('spinning'), 400);
         }
       }
@@ -3024,15 +3045,18 @@
         if (res.ok) {
           const data = await res.json();
           if (data.chunks && data.chunks.length > 0) {
-            resultsDiv.innerHTML = data.chunks.map((ch, idx) => `
+            resultsDiv.innerHTML = data.chunks.map((ch, idx) => {
+              const bodyStr = typeof ch?.body === 'string' ? ch.body : String(ch?.body ?? '');
+              return `
               <div class="result-item">
                 <div class="result-head">
-                  <span class="result-title truncate">${escapeHtml(ch.title || label)} [${escapeHtml(t('chunkLabel', { i: idx + 1, total: data.chunks.length }))}]</span>
-                  <span class="result-badge">${ch.body.length} B</span>
+                  <span class="result-title truncate">${escapeHtml(ch?.title || label)} [${escapeHtml(t('chunkLabel', { i: idx + 1, total: data.chunks.length }))}]</span>
+                  <span class="result-badge">${bodyStr.length} B</span>
                 </div>
-                <div class="result-body">${escapeHtml(ch.body.slice(0, 380))}${ch.body.length > 380 ? '...' : ''}</div>
+                <div class="result-body">${escapeHtml(bodyStr.slice(0, 380))}${bodyStr.length > 380 ? '...' : ''}</div>
               </div>
-            `).join('');
+            `;
+            }).join('');
             const card = document.getElementById('search-inspector-card');
             if (card) card.scrollIntoView({ behavior: 'smooth' });
             return;
@@ -3058,6 +3082,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: q })
         });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
         if (data.hits && data.hits.length > 0) {
@@ -3065,7 +3090,7 @@
             <div class="result-item">
               <div class="result-head">
                 <span class="result-title truncate">${escapeHtml(h.title || h.sourceId)}</span>
-                <span class="result-badge">RRF: ${h.rrfScore}</span>
+                <span class="result-badge">RRF: ${Number(h.rrfScore) || 0}</span>
               </div>
               <div class="result-body">${escapeHtml((h.snippet || '').slice(0, 260))}...</div>
             </div>
@@ -3345,7 +3370,13 @@
         return;
       }
       const serverNow = Number(kv.serverNowMs);
-      const clockOffsetMs = Number.isFinite(serverNow) && serverNow > 0 ? serverNow - Date.now() : 0;
+      let clockOffsetMs;
+      if (Number.isFinite(kv._clockOffsetMs)) {
+        clockOffsetMs = kv._clockOffsetMs;
+      } else {
+        clockOffsetMs = Number.isFinite(serverNow) && serverNow > 0 ? serverNow - Date.now() : 0;
+        kv._clockOffsetMs = clockOffsetMs;
+      }
       kvTtlState = {
         lastPlannerMs: lastMs,
         cacheTtlSec: ttlSec,
@@ -3389,6 +3420,7 @@
       } catch (err) {
         if (reqSeq !== handoffFetchSeq) return;
         cachedHandoffData = null;
+        lastHandoffMarkdown = '';
         if (metaEl) metaEl.textContent = t('handoffError');
         if (previewEl) previewEl.textContent = t('handoffFailBody', { msg: err?.message || String(err) });
       }
@@ -3412,8 +3444,7 @@
 
     async function copyHandoffBrief() {
       const btn = document.getElementById('kv-handoff-copy-btn');
-      const previewEl = document.getElementById('kv-handoff-preview');
-      const text = lastHandoffMarkdown || (previewEl ? previewEl.textContent : '') || '';
+      const text = lastHandoffMarkdown || '';
       if (!text) return;
       let copied = false;
       if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {

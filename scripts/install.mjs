@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "../hooks/compile-cache.mjs";
 import { spawn, spawnSync } from "node:child_process";
-import { promises as fs } from "node:fs";
+import fsSync, { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -290,6 +290,14 @@ try {
     return false;
   }
   console.log(`  - ${res.stdout.trim()}`);
+  const localBin = path.join(os.homedir(), ".local", "bin");
+  const curPath = process.env.PATH || process.env.Path || "";
+  const hasBin = curPath
+    .split(";")
+    .some((p) => p.trim().replace(/[\\/]+$/, "").toLowerCase() === localBin.replace(/[\\/]+$/, "").toLowerCase());
+  if (!hasBin) {
+    process.env.PATH = curPath ? `${curPath};${localBin}` : localBin;
+  }
   return true;
 }
 
@@ -300,6 +308,7 @@ async function verifyMcpServer(scriptPath, extraEnv = {}) {
       windowsHide: true,
       env: { ...process.env, ...extraEnv }
     });
+    child.stdin.on("error", () => {});
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -317,23 +326,23 @@ async function verifyMcpServer(scriptPath, extraEnv = {}) {
     child.on("close", (code) => {
       clearTimeout(timer);
       const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      if (lines.length < 2) {
-        return reject(new Error(`Incomplete MCP response (exit ${code}): ${stderr || stdout}`));
+      const msgs = [];
+      for (const l of lines) {
+        try {
+          const parsed = JSON.parse(l);
+          if (parsed && typeof parsed === "object") msgs.push(parsed);
+        } catch {}
       }
-      try {
-        const initResp = JSON.parse(lines[0]);
-        const listResp = JSON.parse(lines[1]);
-        const tools = listResp?.result?.tools;
-        if (!initResp?.result?.serverInfo || !Array.isArray(tools)) {
-          return reject(new Error("Invalid MCP JSON-RPC responses"));
-        }
-        resolve({
-          serverName: initResp.result.serverInfo.name,
-          tools: tools.map((t) => t.name)
-        });
-      } catch (err) {
-        reject(err);
+      const initResp = msgs.find((m) => m.id === 1);
+      const listResp = msgs.find((m) => m.id === 2);
+      const tools = listResp?.result?.tools;
+      if (!initResp?.result?.serverInfo || !Array.isArray(tools)) {
+        return reject(new Error(`Incomplete or invalid MCP response (exit ${code}): ${stderr || stdout}`));
       }
+      resolve({
+        serverName: initResp.result.serverInfo.name,
+        tools: tools.map((t) => t.name)
+      });
     });
 
     child.stdin.write(JSON.stringify({
@@ -381,7 +390,13 @@ async function runDoctor(targetDir) {
     const fastCheck = await verifyMcpServer(path.join(targetDir, "fast", "mcp-server.mjs"));
     const ctxCheck = await verifyMcpServer(path.join(targetDir, "context", "server.js"), { AGY_DART_DB_PATH: tmpDb });
     const hookCheck = await verifySessionStart(path.join(targetDir, "hooks", "session-start.mjs"), targetDir, tmpDb);
-    const hasSidecar = await pathExists(path.join(targetDir, "sidecars", "dashboard", "sidecar.json"));
+    const hasPluginJson = await pathExists(path.join(targetDir, "plugin.json"));
+    const hasMcpConfig = await pathExists(path.join(targetDir, "mcp_config.json"));
+    const hasSidecarJson = await pathExists(path.join(targetDir, "sidecars", "dashboard", "sidecar.json"));
+    const hasSidecarServer = await pathExists(path.join(targetDir, "sidecars", "dashboard", "server.mjs"));
+    const hasSidecarHtml = await pathExists(path.join(targetDir, "sidecars", "dashboard", "index.html"));
+    const hasSidecar = hasSidecarJson && hasSidecarServer && hasSidecarHtml;
+    const hasPreHook = await pathExists(path.join(targetDir, "hooks", "pre-tool-use.mjs"));
     const hasCliFilter = await pathExists(path.join(targetDir, "hooks", "cli-filter.mjs"));
     const hasPostHook = await pathExists(path.join(targetDir, "hooks", "post-tool-use.mjs"));
     const hasPreInvHook = await pathExists(path.join(targetDir, "hooks", "pre-invocation.mjs"));
@@ -427,10 +442,11 @@ async function runDoctor(targetDir) {
     console.log(`  - MCP [fast]    : OK (${fastCheck.tools.length} tools: ${fastCheck.tools.join(", ")})`);
     console.log(`  - MCP [context] : OK (${ctxCheck.tools.length} tools: ${ctxCheck.tools.join(", ")})`);
     console.log(`  - SessionStart  : OK (${hookCheck.durationMs}ms, ${hookCheck.bytes} bytes)`);
-    console.log(`  - PreToolUse    : OK (matcher: ${matcher}; cli-filter: ${hasCliFilter ? "OK" : "MISSING"})`);
+    console.log(`  - PreToolUse    : ${hasPreHook ? "OK" : "MISSING"} (matcher: ${matcher}; cli-filter: ${hasCliFilter ? "OK" : "MISSING"})`);
     console.log(`  - PostToolUse   : ${hasPostHook && hasPostCfg ? "OK (edit/compaction read-dedup invalidation)" : "MISSING"}`);
     console.log(`  - PreInvocation : ${hasPreInvHook && hasPreInvCfg ? "OK (UI-only KV-cache watermark/TTL watch)" : "MISSING"}`);
     console.log(`  - Sidecar UI    : ${hasSidecar ? "OK (sidecars/dashboard present)" : "MISSING"}`);
+    console.log(`  - Manifests     : ${hasPluginJson && hasMcpConfig ? "OK (plugin.json + mcp_config.json)" : "MISSING"}`);
     for (const line of configLines) {
       console.log(line);
     }
@@ -469,7 +485,21 @@ async function runDoctor(targetDir) {
       }
     }
 
-    return fastCheck.tools.length === 4 && ctxCheck.tools.length === 8 && hookCheck.bytes > 0 && hasSidecar && hasCliFilter && hasPostHook && hasPreInvHook && hasCompileCacheHelper;
+    return (
+      fastCheck.tools.length === 4 &&
+      ctxCheck.tools.length === 8 &&
+      hookCheck.bytes > 0 &&
+      hasPluginJson &&
+      hasMcpConfig &&
+      hasSidecar &&
+      hasPreHook &&
+      hasCliFilter &&
+      hasPostHook &&
+      hasPostCfg &&
+      hasPreInvHook &&
+      hasPreInvCfg &&
+      hasCompileCacheHelper
+    );
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -514,6 +544,116 @@ async function pruneStaleEntries(dstRoot, keepRelSet) {
   return lockedDirs;
 }
 
+function stripWinExtendedPrefix(p) {
+  if (process.platform !== "win32" || typeof p !== "string") return p;
+  const uncMatch = p.match(/^[\\/]{2}\?[\\/]UNC[\\/](.+)$/i);
+  if (uncMatch) {
+    return `\\\\${uncMatch[1].replace(/\//g, "\\")}`;
+  }
+  const driveMatch = p.match(/^[\\/]{2}[?.][\\/]([a-zA-Z]:)([\\/].*)?$/);
+  if (driveMatch) {
+    return `${driveMatch[1]}${driveMatch[2] || "\\"}`;
+  }
+  return p;
+}
+
+function isWinDeviceNamespacePath(p) {
+  if (process.platform !== "win32" || typeof p !== "string") return false;
+  const trimmed = p.trim();
+  const stripped = stripWinExtendedPrefix(trimmed);
+  if (/^[\\/]{2}[?.][\\/]/.test(stripped)) return true;
+  // Bare UNC server path with no share segment (e.g. \\server or \\server\)
+  if (/^[\\/]{2}[^\\/]+[\\/]?$/.test(stripped)) return true;
+  return false;
+}
+
+function isLexicalFilesystemRoot(p) {
+  if (typeof p !== "string" || !p.trim()) return false;
+  const stripped = stripWinExtendedPrefix(p.trim());
+  const resolved = path.resolve(stripped);
+  const root = path.parse(resolved).root;
+  if (!root) return false;
+  const trimSep = (s) => (s.length > 1 ? s.replace(/[\\/]+$/, "") : s);
+  return process.platform === "win32"
+    ? trimSep(resolved).toLowerCase() === trimSep(root).toLowerCase()
+    : resolved === root;
+}
+
+function realpathCanonicalSync(p) {
+  const real = typeof fsSync.realpathSync.native === "function"
+    ? fsSync.realpathSync.native(p)
+    : fsSync.realpathSync(p);
+  return stripWinExtendedPrefix(real);
+}
+
+function normalizeComparePath(p) {
+  const stripped = stripWinExtendedPrefix(String(p || ""));
+  const resolved = path.resolve(stripped);
+  if (isWinDeviceNamespacePath(p) || isLexicalFilesystemRoot(stripped)) {
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  }
+  let cur = resolved;
+  const tail = [];
+  while (true) {
+    try {
+      const real = realpathCanonicalSync(cur);
+      const joined = tail.length > 0 ? path.join(real, ...tail.reverse()) : real;
+      return process.platform === "win32" ? joined.toLowerCase() : joined;
+    } catch {
+      const parent = path.dirname(cur);
+      if (!parent || parent === cur) {
+        return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      }
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+function isPathSameOrInside(candidate, ancestor) {
+  const nc = normalizeComparePath(candidate);
+  const na = normalizeComparePath(ancestor);
+  const rel = path.relative(na, nc);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel));
+}
+
+function isFilesystemRootPath(p) {
+  if (isLexicalFilesystemRoot(p)) return true;
+  const normalized = normalizeComparePath(p);
+  const root = path.parse(normalized).root;
+  if (!root) return false;
+  const trimSep = (s) => (s.length > 1 ? s.replace(/[\\/]+$/, "") : s);
+  return process.platform === "win32"
+    ? trimSep(normalized).toLowerCase() === trimSep(root).toLowerCase()
+    : normalized === root;
+}
+
+function isProtectedTargetDir(targetPath, srcRoot) {
+  if (isWinDeviceNamespacePath(targetPath) || isFilesystemRootPath(targetPath)) {
+    return true;
+  }
+  const home = path.resolve(os.homedir());
+  const effectiveHome = path.resolve(getHomeDir());
+  const globalPluginsRoot = path.resolve(getGlobalPluginsRoot());
+  return (
+    isPathSameOrInside(srcRoot, targetPath) ||
+    isPathSameOrInside(targetPath, srcRoot) ||
+    isPathSameOrInside(home, targetPath) ||
+    isPathSameOrInside(effectiveHome, targetPath) ||
+    isPathSameOrInside(globalPluginsRoot, targetPath)
+  );
+}
+
+async function hasValidPluginManifest(dir) {
+  const manifestPath = path.join(dir, "plugin.json");
+  try {
+    const parsedManifest = JSON.parse((await fs.readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
+    return Boolean(parsedManifest && parsedManifest.name === PLUGIN_NAME);
+  } catch {
+    return false;
+  }
+}
+
 async function runInstall(opts) {
   checkNodeAndSqlite();
   await import("node:sqlite");
@@ -522,32 +662,64 @@ async function runInstall(opts) {
   const dstRoot = path.resolve(opts.targetDir);
   const manifest = opts.withDevtools ? FILES_TO_COPY : RUNTIME_FILES;
 
-  if (srcRoot !== dstRoot) {
-    // Copy/overwrite all manifest files in-place FIRST, then prune stale entries.
-    // On Windows, running Antigravity MCP/Sidecar processes hold CWD handles on dstRoot
-    // (causing `fs.rm(dstRoot, { recursive: true })` to throw EBUSY after partially deleting files).
-    // In-place sync + stale pruning is atomic-safe for live upgrades while Antigravity is running.
-    await fs.mkdir(dstRoot, { recursive: true });
-    const keepRelSet = new Set();
-    for (const rel of manifest) {
-      const src = path.join(srcRoot, rel);
-      const dst = path.join(dstRoot, rel);
-      if (!(await pathExists(src))) {
-        throw new Error(`Missing required source file: ${rel}`);
-      }
-      await fs.mkdir(path.dirname(dst), { recursive: true });
-      await fs.copyFile(src, dst);
-      const normRel = rel.replace(/\\/g, "/");
-      keepRelSet.add(process.platform === "win32" ? normRel.toLowerCase() : normRel);
+  if (isProtectedTargetDir(dstRoot, srcRoot)) {
+    throw new Error(`Refusing to install into protected directory: ${dstRoot}`);
+  }
+  let dstStat = null;
+  try {
+    dstStat = await fs.stat(dstRoot);
+  } catch (err) {
+    if (err && err.code !== "ENOENT") throw err;
+    if (await pathExists(dstRoot)) {
+      throw new Error(`Refusing to install into broken symlink path: ${dstRoot}`);
     }
-    const locked = await pruneStaleEntries(dstRoot, keepRelSet);
-    console.log(`Installed agy-dart (${opts.withDevtools ? "runtime+devtools" : "runtime-only"}, ${manifest.length} files) to ${dstRoot}`);
-    if (locked.length > 0) {
-      console.log(`  - Note          : Skipped removing busy path(s) held by a running process (${locked.join(", ")}); restart Antigravity to complete cleanup.`);
+  }
+  if (dstStat) {
+    if (!dstStat.isDirectory()) {
+      throw new Error(`Refusing to install into non-directory path: ${dstRoot}`);
+    }
+    const entries = await fs.readdir(dstRoot);
+    if (entries.length > 0 && !(await hasValidPluginManifest(dstRoot))) {
+      throw new Error(
+        `Refusing to install into non-empty directory ${dstRoot}: directory does not contain an '${PLUGIN_NAME}' plugin.json manifest.`
+      );
     }
   }
 
-  const modeCfg = await applyMode(dstRoot, opts.mode, opts.isCustomTarget);
+  // Pre-validate all manifest source files BEFORE modifying destination so partial broken installs never occur
+  const missingSources = [];
+  for (const rel of manifest) {
+    const src = path.join(srcRoot, rel);
+    if (!(await pathExists(src))) {
+      missingSources.push(rel);
+    }
+  }
+  if (missingSources.length > 0) {
+    throw new Error(`Missing required source file(s): ${missingSources.join(", ")}`);
+  }
+
+  // Copy/overwrite all manifest files in-place FIRST, then prune stale entries.
+  // On Windows, running Antigravity MCP/Sidecar processes hold CWD handles on dstRoot
+  // (causing `fs.rm(dstRoot, { recursive: true })` to throw EBUSY after partially deleting files).
+  // In-place sync + stale pruning is atomic-safe for live upgrades while Antigravity is running.
+  await fs.mkdir(dstRoot, { recursive: true });
+  const keepRelSet = new Set();
+  for (const rel of manifest) {
+    const src = path.join(srcRoot, rel);
+    const dst = path.join(dstRoot, rel);
+    await fs.mkdir(path.dirname(dst), { recursive: true });
+    await fs.copyFile(src, dst);
+    const normRel = rel.replace(/\\/g, "/");
+    keepRelSet.add(process.platform === "win32" ? normRel.toLowerCase() : normRel);
+  }
+  const locked = await pruneStaleEntries(dstRoot, keepRelSet);
+  console.log(`Installed agy-dart (${opts.withDevtools ? "runtime+devtools" : "runtime-only"}, ${manifest.length} files) to ${dstRoot}`);
+  if (locked.length > 0) {
+    console.log(`  - Note          : Skipped removing busy path(s) held by a running process (${locked.join(", ")}); restart Antigravity to complete cleanup.`);
+  }
+
+  const skipDb = Boolean(opts.isCustomTarget || opts.isProject);
+  const modeCfg = await applyMode(dstRoot, opts.mode, skipDb);
   console.log(`Configured mode: ${opts.mode} — ${modeCfg.label}`);
 
   if (opts.installRg) {
@@ -574,7 +746,8 @@ async function main() {
       if (!(await pathExists(opts.targetDir))) {
         throw new Error(`agy-dart is not installed at ${opts.targetDir}. Run 'install' first.`);
       }
-      const cfg = await applyMode(opts.targetDir, opts.mode, opts.isCustomTarget);
+      const skipDb = Boolean(opts.isCustomTarget || opts.isProject);
+      const cfg = await applyMode(opts.targetDir, opts.mode, skipDb);
       console.log(`Switched agy-dart mode at ${opts.targetDir} -> ${opts.mode} (${cfg.label})`);
       break;
     }
@@ -585,24 +758,29 @@ async function main() {
       break;
     }
     case "uninstall": {
-      if (path.resolve(opts.targetDir) === path.resolve(REPO_ROOT)) {
-        throw new Error("Refusing to delete source repository directory.");
+      const targetResolved = path.resolve(opts.targetDir);
+      if (isProtectedTargetDir(targetResolved, REPO_ROOT)) {
+        throw new Error(`Refusing to delete protected directory: ${targetResolved}`);
       }
-      if (await pathExists(opts.targetDir)) {
+      if (await pathExists(targetResolved)) {
+        // Verify target actually contains an agy-dart plugin.json manifest before recursive deletion
+        if (!(await hasValidPluginManifest(targetResolved))) {
+          throw new Error(`Refusing to delete ${targetResolved}: directory does not contain an '${PLUGIN_NAME}' plugin.json manifest.`);
+        }
         try {
-          await fs.rm(opts.targetDir, { recursive: true, force: true });
-          console.log(`Removed agy-dart from ${opts.targetDir}`);
+          await fs.rm(targetResolved, { recursive: true, force: true });
+          console.log(`Removed agy-dart from ${targetResolved}`);
         } catch (err) {
           if (err && (err.code === "EBUSY" || err.code === "EPERM")) {
             throw new Error(
-              `Cannot remove ${opts.targetDir} because a running Antigravity process holds a lock (${err.code}). ` +
+              `Cannot remove ${targetResolved} because a running Antigravity process holds a lock (${err.code}). ` +
                 `Disable agy-dart or close Antigravity first, then re-run 'npm run uninstall:plugin'.`
             );
           }
           throw err;
         }
       } else {
-        console.log(`Not installed at ${opts.targetDir}`);
+        console.log(`Not installed at ${targetResolved}`);
       }
       break;
     }

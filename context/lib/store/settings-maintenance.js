@@ -272,56 +272,95 @@ export class SettingsMaintenanceMethods {
     }
 
     if (scope === "all" || scope === "lifetime") {
-      this.db.exec(`
-        DELETE FROM chunks;
-        DELETE FROM chunks_tri;
-        DELETE FROM sources;
-        DELETE FROM events;
-        DELETE FROM file_reads;
-        DELETE FROM file_snapshots;
-        DELETE FROM repo_cache;
-        DELETE FROM outline_cache;
-        DELETE FROM ghost_interceptions;
-        DELETE FROM session_checkpoints;
-        VACUUM;
-      `);
+      this._withWriteTx(() => {
+        this.db.exec(`
+          DELETE FROM chunks;
+          DELETE FROM chunks_tri;
+          DELETE FROM sources;
+          DELETE FROM events;
+          DELETE FROM file_reads;
+          DELETE FROM file_snapshots;
+          DELETE FROM repo_cache;
+          DELETE FROM outline_cache;
+          DELETE FROM ghost_interceptions;
+          DELETE FROM session_checkpoints;
+        `);
+      });
+      try {
+        this.db.exec("VACUUM;");
+      } catch {
+        // Best-effort VACUUM: ignore transient SQLITE_BUSY from concurrent readers
+      }
       return { ok: true, purged: "all" };
     }
 
-    if (scope === "app" && sinceTs) {
-      const sinceIso = new Date(sinceTs).toISOString();
-      const sourceIds = this.db.prepare("SELECT id FROM sources WHERE created_at >= ? OR created_ts >= ?").all(sinceIso, sinceTs).map((r) => r.id);
-      for (const sId of sourceIds) {
-        this.db.prepare("DELETE FROM chunks WHERE source_id = ?").run(sId);
-        this.db.prepare("DELETE FROM chunks_tri WHERE source_id = ?").run(sId);
+    if (scope === "app") {
+      if (sinceTs === null || sinceTs === undefined || typeof sinceTs === "boolean" || (typeof sinceTs === "string" && sinceTs.trim() === "") || !Number.isFinite(Number(sinceTs))) {
+        throw new Error("purge({ scope: 'app' }) requires a finite 'sinceTs' timestamp");
       }
-      this.db.prepare("DELETE FROM sources WHERE created_at >= ? OR created_ts >= ?").run(sinceIso, sinceTs);
-      this.db.prepare("DELETE FROM events WHERE created_at >= ?").run(sinceIso);
-      this.db.prepare("DELETE FROM file_reads WHERE read_ts >= ?").run(sinceTs);
-      this.db.prepare("DELETE FROM file_snapshots WHERE updated_ts >= ?").run(sinceTs);
-      this.db.prepare("DELETE FROM ghost_interceptions WHERE blocked_ts >= ?").run(sinceTs);
-      this.db.prepare("DELETE FROM session_checkpoints WHERE updated_ts >= ?").run(sinceTs);
-      return { ok: true, purged: "app", count: sourceIds.length };
+      const sinceNum = Number(sinceTs);
+      const sinceIso = new Date(sinceNum).toISOString();
+      const count = this._withWriteTx(() => {
+        const sourceIds = this.db
+          .prepare("SELECT id FROM sources WHERE created_at >= ? OR created_ts >= ?")
+          .all(sinceIso, sinceNum)
+          .map((r) => r.id);
+        for (let i = 0; i < sourceIds.length; i += 400) {
+          const batch = sourceIds.slice(i, i + 400);
+          const placeholders = batch.map(() => "?").join(",");
+          this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`).run(...batch);
+          this.db.prepare(`DELETE FROM chunks_tri WHERE source_id IN (${placeholders})`).run(...batch);
+        }
+        this.db.prepare("DELETE FROM sources WHERE created_at >= ? OR created_ts >= ?").run(sinceIso, sinceNum);
+        this.db.prepare("DELETE FROM events WHERE created_at >= ?").run(sinceIso);
+        this.db.prepare("DELETE FROM file_reads WHERE read_ts >= ?").run(sinceNum);
+        this.db.prepare("DELETE FROM file_snapshots WHERE updated_ts >= ?").run(sinceNum);
+        this.db.prepare("DELETE FROM ghost_interceptions WHERE blocked_ts >= ?").run(sinceNum);
+        this.db.prepare("DELETE FROM session_checkpoints WHERE updated_ts >= ?").run(sinceNum);
+        return sourceIds.length;
+      });
+      return { ok: true, purged: "app", count };
     }
 
-    if (scope === "worktree" && worktree) {
-      this.db.prepare("DELETE FROM chunks WHERE worktree = ?").run(worktree);
-      this.db.prepare("DELETE FROM sources WHERE worktree = ?").run(worktree);
-      this.db.prepare("DELETE FROM events WHERE worktree = ?").run(worktree);
-      this.db.prepare("DELETE FROM session_checkpoints WHERE worktree = ?").run(worktree);
+    if (scope === "worktree") {
+      if (typeof worktree !== "string" || !worktree.trim()) {
+        throw new Error("purge({ scope: 'worktree' }) requires a non-empty 'worktree' path");
+      }
+      this._withWriteTx(() => {
+        const sourceIds = this.db
+          .prepare("SELECT id FROM sources WHERE worktree = ?")
+          .all(worktree)
+          .map((r) => r.id);
+        for (let i = 0; i < sourceIds.length; i += 400) {
+          const batch = sourceIds.slice(i, i + 400);
+          const placeholders = batch.map(() => "?").join(",");
+          this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`).run(...batch);
+          this.db.prepare(`DELETE FROM chunks_tri WHERE source_id IN (${placeholders})`).run(...batch);
+        }
+        this.db.prepare("DELETE FROM chunks WHERE worktree = ?").run(worktree);
+        this.db.prepare("DELETE FROM sources WHERE worktree = ?").run(worktree);
+        this.db.prepare("DELETE FROM events WHERE worktree = ?").run(worktree);
+        this.db.prepare("DELETE FROM session_checkpoints WHERE worktree = ?").run(worktree);
+      });
       return { ok: true, purged: "worktree", worktree };
     }
 
-    const sid = sessionId || "default";
-    this.db.prepare("DELETE FROM chunks WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM chunks_tri WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM sources WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM events WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM file_reads WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM file_snapshots WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM ghost_interceptions WHERE session_id = ?").run(sid);
-    this.db.prepare("DELETE FROM session_checkpoints WHERE session_id = ?").run(sid);
-    return { ok: true, purged: "session", sessionId: sid };
+    if (scope === "session") {
+      const sid = sessionId || "default";
+      this._withWriteTx(() => {
+        this.db.prepare("DELETE FROM chunks WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM chunks_tri WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM sources WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM events WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM file_reads WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM file_snapshots WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM ghost_interceptions WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM session_checkpoints WHERE session_id = ?").run(sid);
+      });
+      return { ok: true, purged: "session", sessionId: sid };
+    }
+
+    throw new Error(`Invalid purge scope: '${String(scope)}'`);
   }
 
   /** Run diagnostic checks */
@@ -329,6 +368,7 @@ export class SettingsMaintenanceMethods {
     try {
       this.open();
       const versionRow = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+      const sqliteRow = this.db.prepare("SELECT sqlite_version() AS v").get();
       const ftsCheck = this.db.prepare("SELECT count(*) as cnt FROM chunks").get();
       const srcCheck = this.db.prepare("SELECT count(*) as cnt FROM sources").get();
       const evCheck = this.db.prepare("SELECT count(*) as cnt FROM events").get();
@@ -354,7 +394,7 @@ export class SettingsMaintenanceMethods {
         trackedFileSnapshots: snapsCheck ? snapsCheck.cnt : 0,
         cachedOutlines: outlineCheck ? outlineCheck.cnt : 0,
         lastMaintenanceAt: lastMaint ? new Date(Number(lastMaint)).toISOString() : null,
-        sqliteVersion: process.versions.node
+        sqliteVersion: sqliteRow && sqliteRow.v ? String(sqliteRow.v) : "unknown"
       };
     } catch (err) {
       return {
@@ -424,31 +464,36 @@ export class SettingsMaintenanceMethods {
   /** Get active cutoff in bytes (0 = none/disabled) */
   getCutoff(sessionId = null) {
     this.open();
+    const parseMetaCutoff = (raw) => {
+      if (raw === null || raw === undefined) return null;
+      const parsed = parseInt(raw, 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    };
     // 1. Session/Conversation override
     if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
-      const sessionCutoff = this.getMeta(`cutoff:session:${sessionId}`);
+      const sessionCutoff = parseMetaCutoff(this.getMeta(`cutoff:session:${sessionId}`));
       if (sessionCutoff !== null) {
-        return parseInt(sessionCutoff, 10);
+        return sessionCutoff;
       }
       // If checking a conversation, fall back to the app session cutoff if set
       if (sessionId !== "app") {
-        const appCutoff = this.getMeta("cutoff:session:app");
+        const appCutoff = parseMetaCutoff(this.getMeta("cutoff:session:app"));
         if (appCutoff !== null) {
-          return parseInt(appCutoff, 10);
+          return appCutoff;
         }
       }
     }
 
     // 2. Unified config / env override if explicitly set
     const cfgMaxRead = getEffectiveConfig().maxReadBytes;
-    if (cfgMaxRead !== null && cfgMaxRead !== undefined) {
-      return cfgMaxRead;
+    if (cfgMaxRead !== null && cfgMaxRead !== undefined && Number.isFinite(Number(cfgMaxRead))) {
+      return Math.max(0, Math.floor(Number(cfgMaxRead)));
     }
 
     // 3. Saved global setting in SQLite
-    const globalCutoff = this.getMeta("cutoff:global");
+    const globalCutoff = parseMetaCutoff(this.getMeta("cutoff:global"));
     if (globalCutoff !== null) {
-      return parseInt(globalCutoff, 10);
+      return globalCutoff;
     }
 
     // 4. Default 16 KB (balanced co-op cutoff for agy-dart: allows <16 KB small files & <=410-line slices)
@@ -487,10 +532,12 @@ export class SettingsMaintenanceMethods {
     }
     const cleanList = Array.from(combined);
     const serialized = JSON.stringify(cleanList);
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       this.setMeta(`exempt_ext:session:${sessionId}`, serialized);
     } else {
       this.setMeta("exempt_ext:global", serialized);
+      this.deleteMeta("exempt_ext:session:app");
+      this.deleteMeta("exempt_ext:session:default");
     }
     return cleanList;
   }
@@ -498,7 +545,7 @@ export class SettingsMaintenanceMethods {
   /** Get list of active category IDs */
   getExemptCategories(sessionId = null) {
     this.open();
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       const raw = this.getMeta(`exempt_categories:session:${sessionId}`);
       if (raw) {
         try {
@@ -533,10 +580,12 @@ export class SettingsMaintenanceMethods {
       ? Array.from(new Set(categories.map(c => String(c).trim().toLowerCase()).filter(c => FILE_CATEGORIES[c])))
       : [...DEFAULT_ACTIVE_CATEGORIES];
     const serialized = JSON.stringify(cleanList);
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       this.setMeta(`exempt_categories:session:${sessionId}`, serialized);
     } else {
       this.setMeta("exempt_categories:global", serialized);
+      this.deleteMeta("exempt_categories:session:app");
+      this.deleteMeta("exempt_categories:session:default");
     }
     this._recomputeExemptExtensions(sessionId);
     return cleanList;
@@ -565,7 +614,7 @@ export class SettingsMaintenanceMethods {
   /** Get custom file extensions (explicitly added by user) */
   getCustomExemptExtensions(sessionId = null) {
     this.open();
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       const raw = this.getMeta(`custom_exempt_ext:session:${sessionId}`);
       if (raw) {
         try {
@@ -613,10 +662,12 @@ export class SettingsMaintenanceMethods {
       )
     );
     const serialized = JSON.stringify(cleanList);
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       this.setMeta(`custom_exempt_ext:session:${sessionId}`, serialized);
     } else {
       this.setMeta("custom_exempt_ext:global", serialized);
+      this.deleteMeta("custom_exempt_ext:session:app");
+      this.deleteMeta("custom_exempt_ext:session:default");
     }
     this._recomputeExemptExtensions(sessionId);
     return cleanList;
@@ -649,7 +700,7 @@ export class SettingsMaintenanceMethods {
   getExemptExtensions(sessionId = null) {
     this.open();
     // 1. Session/Conversation override
-    if (sessionId && sessionId !== "all") {
+    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
       const raw = this.getMeta(`exempt_ext:session:${sessionId}`);
       if (raw) {
         try {
@@ -696,7 +747,7 @@ export class SettingsMaintenanceMethods {
     );
     const activeCats = [];
     for (const [catId, catObj] of Object.entries(FILE_CATEGORIES)) {
-      if (catObj.extensions.some((e) => cleanList.includes(e))) {
+      if (Array.isArray(catObj.extensions) && catObj.extensions.length > 0 && catObj.extensions.every((e) => cleanList.includes(e))) {
         activeCats.push(catId);
       }
     }
@@ -942,41 +993,46 @@ export class SettingsMaintenanceMethods {
   pruneStaleSources({ maxSourcesPerSession = 50, maxTotalSources = 200 } = {}) {
     this.open();
     try {
-      // 1. Prune sources exceeding per-session cap
+      const deleteSourceIds = (ids) => {
+        if (!ids || ids.length === 0) return;
+        this._withWriteTx(() => {
+          for (let i = 0; i < ids.length; i += 400) {
+            const batch = ids.slice(i, i + 400);
+            const placeholders = batch.map(() => "?").join(",");
+            this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`).run(...batch);
+            this.db.prepare(`DELETE FROM chunks_tri WHERE source_id IN (${placeholders})`).run(...batch);
+            this.db.prepare(`DELETE FROM sources WHERE id IN (${placeholders})`).run(...batch);
+          }
+        });
+      };
+
+      // 1. Prune sources exceeding per-session cap (LRU by accessed_ts)
       const excessSessionSources = this.db
         .prepare(`
           SELECT id FROM sources
           WHERE id NOT IN (
             SELECT id FROM sources s2
             WHERE s2.session_id = sources.session_id
-            ORDER BY s2.created_ts DESC
+            ORDER BY s2.accessed_ts DESC, s2.created_ts DESC
             LIMIT ?
           )
         `)
         .all(maxSourcesPerSession);
 
       if (excessSessionSources.length > 0) {
-        const ids = excessSessionSources.map((r) => r.id);
-        const placeholders = ids.map(() => "?").join(",");
-        this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`).run(...ids);
-        this.db.prepare(`DELETE FROM chunks_tri WHERE source_id IN (${placeholders})`).run(...ids);
-        this.db.prepare(`DELETE FROM sources WHERE id IN (${placeholders})`).run(...ids);
+        deleteSourceIds(excessSessionSources.map((r) => r.id));
       }
 
-      // 2. Prune global total sources if over cap
+      // 2. Prune global total sources if over cap (LRU by accessed_ts)
       const totalCountRow = this.db.prepare("SELECT count(*) as count FROM sources").get();
       if (totalCountRow && totalCountRow.count > maxTotalSources) {
         const deleteCount = totalCountRow.count - maxTotalSources;
         const oldest = this.db
-          .prepare("SELECT id FROM sources ORDER BY created_ts ASC LIMIT ?")
+          .prepare("SELECT id FROM sources ORDER BY accessed_ts ASC, created_ts ASC LIMIT ?")
           .all(deleteCount);
 
         if (oldest.length > 0) {
-          const ids = oldest.map((r) => r.id);
-          const placeholders = ids.map(() => "?").join(",");
-          this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`).run(...ids);
-          this.db.prepare(`DELETE FROM chunks_tri WHERE source_id IN (${placeholders})`).run(...ids);
-          this.db.prepare(`DELETE FROM sources WHERE id IN (${placeholders})`).run(...ids);
+          deleteSourceIds(oldest.map((r) => r.id));
         }
       }
     } catch {
