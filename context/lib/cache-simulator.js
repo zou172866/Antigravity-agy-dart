@@ -1,11 +1,13 @@
 import {
   analyzeMultipleSessionsCache,
   BUST_DROP_RATIO,
+  computeKeepalivePingTokenSplit,
   DEFAULT_CACHE_TTL_SEC,
   DEFAULT_INPUT_PRICE_PER_1M,
   extractStepTokenUsage,
   MIN_CACHEABLE_CONTEXT_TOKENS,
-  resolveModelProfile
+  resolveModelProfile,
+  scheduleKeepAlivePings
 } from "./cache-analyzer.js";
 
 const TTL_5M_SEC = 300;
@@ -1077,6 +1079,8 @@ function replayKeepAlivePolicy(traces, parsedOpts, observedCostUsd, { id, label,
     let prevDiscountRate = trace.cacheDiscountRate;
     let prevInputPricePer1M = trace.inputPricePer1M;
     let prevObsWriteMult = trace.obsWriteMult;
+    let prevTailReprocessTokens = trace.profile?.minTurnDeltaForFullCache ?? 0;
+    const maxPings = mode === "1x" ? 1 : parsedOpts.maxPingsPerGap;
 
     for (let idx = 0; idx < trace.turns.length; idx++) {
       const turn = trace.turns[idx];
@@ -1094,46 +1098,24 @@ function replayKeepAlivePolicy(traces, parsedOpts, observedCostUsd, { id, label,
       if (
         idx > 0 &&
         prevSimCtx >= parsedOpts.keepaliveMinTokens &&
-        sameModel &&
-        !isCompaction &&
         turn.gapSec !== null &&
-        turn.gapSec >= trace.effectiveTtlSec
+        turn.gapSec >= pingIntervalSec
       ) {
-        const pingDiscount = turn.discountRate ?? prevDiscountRate ?? trace.cacheDiscountRate;
-        const pingPrice = turn.inputPricePer1M ?? prevInputPricePer1M ?? trace.inputPricePer1M;
-        const pingWriteMult = turn.obsWriteMult ?? prevObsWriteMult ?? trace.obsWriteMult;
-
-        if (mode === "1x") {
-          interTurnPings += 1;
-          const pingRead = prevSimCtx;
-          const pingUncached = parsedOpts.pingOverheadTokens;
-          sessCached += pingRead;
-          sessUncached += pingUncached;
-          sessCostRaw += computeTokenCostUsd(
-            pingRead,
-            pingUncached,
-            0,
-            pingDiscount,
-            pingWriteMult,
-            pingPrice
-          );
-          if (turn.gapSec < trace.effectiveTtlSec + pingIntervalSec && !isNonTtlObsBust) {
-            bridgedByKeepAlive = true;
-            if (turn.obsWasBust && turn.obsBustCause === "ttl_idle_expiry") {
-              avoidedIdleBusts += 1;
-            }
-          } else {
-            wastedPings += 1;
-          }
-        } else {
-          const rawNeeded = Math.max(1, Math.floor(turn.gapSec / pingIntervalSec));
-          if (rawNeeded > parsedOpts.maxPingsPerGap) {
+        const schedule = scheduleKeepAlivePings(turn.gapSec, { pingIntervalSec, maxPings });
+        if (schedule.pings > 0) {
+          if (mode !== "1x" && schedule.capped) {
             cappedGapCount += 1;
           }
-          const nPings = Math.min(parsedOpts.maxPingsPerGap, rawNeeded);
-          interTurnPings += nPings;
-          const pingRead = prevSimCtx * nPings;
-          const pingUncached = parsedOpts.pingOverheadTokens * nPings;
+          const pingDiscount = prevDiscountRate ?? turn.discountRate ?? trace.cacheDiscountRate;
+          const pingPrice = prevInputPricePer1M ?? turn.inputPricePer1M ?? trace.inputPricePer1M;
+          const pingWriteMult = prevObsWriteMult ?? turn.obsWriteMult ?? trace.obsWriteMult;
+          const split = computeKeepalivePingTokenSplit(prevSimCtx, {
+            pingOverheadTokens: parsedOpts.pingOverheadTokens,
+            tailReprocessTokens: prevTailReprocessTokens
+          });
+          interTurnPings += schedule.pings;
+          const pingRead = split.cachedReadTokens * schedule.pings;
+          const pingUncached = split.uncachedTokens * schedule.pings;
           sessCached += pingRead;
           sessUncached += pingUncached;
           sessCostRaw += computeTokenCostUsd(
@@ -1144,14 +1126,20 @@ function replayKeepAlivePolicy(traces, parsedOpts, observedCostUsd, { id, label,
             pingWriteMult,
             pingPrice
           );
-          const maxReachableSec = nPings * pingIntervalSec + trace.effectiveTtlSec;
-          if (turn.gapSec < maxReachableSec && !isNonTtlObsBust) {
+          const maxReachableSec = schedule.pings * pingIntervalSec + trace.effectiveTtlSec;
+          if (
+            sameModel &&
+            !isCompaction &&
+            turn.gapSec >= trace.effectiveTtlSec &&
+            turn.gapSec < maxReachableSec &&
+            !isNonTtlObsBust
+          ) {
             bridgedByKeepAlive = true;
             if (turn.obsWasBust && turn.obsBustCause === "ttl_idle_expiry") {
               avoidedIdleBusts += 1;
             }
           } else {
-            wastedPings += nPings;
+            wastedPings += schedule.pings;
           }
         }
       }
@@ -1200,6 +1188,7 @@ function replayKeepAlivePolicy(traces, parsedOpts, observedCostUsd, { id, label,
       prevDiscountRate = tDiscount;
       prevObsWriteMult = tWriteMult;
       prevInputPricePer1M = tPrice;
+      prevTailReprocessTokens = turn.turnProfile?.minTurnDeltaForFullCache ?? trace.profile?.minTurnDeltaForFullCache ?? 0;
     }
 
     const lastTurn = trace.turns[trace.turns.length - 1];
@@ -1208,15 +1197,17 @@ function replayKeepAlivePolicy(traces, parsedOpts, observedCostUsd, { id, label,
       lastTurn.ctxTokens >= parsedOpts.keepaliveMinTokens &&
       parsedOpts.keepaliveTailSec > 0
     ) {
-      const nTail =
-        mode === "1x"
-          ? 1
-          : Math.min(parsedOpts.maxPingsPerGap, Math.floor(parsedOpts.keepaliveTailSec / pingIntervalSec));
+      const tailSchedule = scheduleKeepAlivePings(parsedOpts.keepaliveTailSec, { pingIntervalSec, maxPings });
+      const nTail = tailSchedule.pings;
       if (nTail > 0) {
         tailPings += nTail;
         wastedPings += nTail;
-        const pingRead = lastTurn.ctxTokens * nTail;
-        const pingUncached = parsedOpts.pingOverheadTokens * nTail;
+        const split = computeKeepalivePingTokenSplit(lastTurn.ctxTokens, {
+          pingOverheadTokens: parsedOpts.pingOverheadTokens,
+          tailReprocessTokens: prevTailReprocessTokens
+        });
+        const pingRead = split.cachedReadTokens * nTail;
+        const pingUncached = split.uncachedTokens * nTail;
         sessCached += pingRead;
         sessUncached += pingUncached;
         sessCostRaw += computeTokenCostUsd(

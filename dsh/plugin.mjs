@@ -118,7 +118,10 @@ export function apply(ctx, config = {}) {
 
   ctx.on("tools/result", (exec, result) => {
     const toolName = String(exec?.name || "");
-    if (!POST_TRACK_RE.test(toolName)) return;
+    const isFailedRead =
+      toolName.toLowerCase() === "read" &&
+      Boolean(result?.isError || result?.cancelled || result?.aborted);
+    if (!POST_TRACK_RE.test(toolName) && !isFailedRead) return;
     Promise.resolve()
       .then(() =>
         processPostToolPayload({
@@ -128,7 +131,8 @@ export function apply(ctx, config = {}) {
           tool_name: toolName,
           tool_input: exec.arguments || {},
           tool_output: extractResultText(result),
-          is_error: Boolean(result?.isError)
+          is_error: Boolean(result?.isError),
+          cancelled: Boolean(result?.cancelled || result?.aborted)
         })
       )
       .catch(() => {});

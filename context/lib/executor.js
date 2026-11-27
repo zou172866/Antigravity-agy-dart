@@ -3,11 +3,140 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getEffectiveConfig } from "./config.js";
 
 export const OUTPUT_CAP = 16384; // 16 KB default preview cap
-export const DEFAULT_TIMEOUT_MS = 120000; // 120s default sandbox timeout
+export const DEFAULT_TIMEOUT_MS = 120000; // 120s default exec timeout
 export const MIN_TIMEOUT_MS = 1000;
-export const MAX_TIMEOUT_MS = 300000; // 300s max sandbox timeout
+export const MAX_TIMEOUT_MS = 300000; // 300s max exec timeout
+
+const SAFE_CHILD_ENV_ALLOWLIST = new Set([
+  // Core OS & filesystem environment (Windows + POSIX)
+  "PATH",
+  "PATHEXT",
+  "COMSPEC",
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "OS",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "COMMONPROGRAMFILES",
+  "COMMONPROGRAMFILES(X86)",
+  "PUBLIC",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "COMPUTERNAME",
+  "USERNAME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "PWD",
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "CI",
+  // Language & toolchain runtimes
+  "NODE_ENV",
+  "NODE_PATH",
+  "NODE_OPTIONS",
+  "NODE_EXTRA_CA_CERTS",
+  "NVM_HOME",
+  "NVM_SYMLINK",
+  "NVM_DIR",
+  "FNM_DIR",
+  "VOLTA_HOME",
+  "PNPM_HOME",
+  "BUN_INSTALL",
+  "DENO_DIR",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "PYTHONIOENCODING",
+  "PYTHONUTF8",
+  "PYENV_ROOT",
+  "VIRTUAL_ENV",
+  "CONDA_PREFIX",
+  "CONDA_DEFAULT_ENV",
+  "GOPATH",
+  "GOROOT",
+  "GOMODCACHE",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "JAVA_HOME",
+  "DOTNET_ROOT",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY"
+]);
+
+const SENSITIVE_ENV_KEY_RE =
+  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CREDENTIALS|AUTH|PRIVATE_?KEY|ACCESS_?KEY|SESSION_?ID|COOKIE|SIGNING_?KEY|BEARER|JWT|OAUTH|WEBHOOK)(?:$|_)|^(?:AWS_(?:ACCESS|SECRET|SESSION|SECURITY|WEB_IDENTITY)|ANTHROPIC_|OPENAI_|GEMINI_|GOOGLE_API_|GOOGLE_APPLICATION_CREDENTIALS|AZURE_(?:CLIENT_SECRET|STORAGE_KEY|API_KEY)|GH_TOKEN|GITHUB_TOKEN|GITLAB_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|PYPI_TOKEN|DOCKER_PASSWORD|HF_TOKEN|HUGGING_?FACE_HUB_TOKEN|SLACK_TOKEN|DISCORD_TOKEN|STRIPE_|TWILIO_|SENDGRID_|DATABASE_URL|POSTGRES_PASSWORD|MYSQL_PWD|REDIS_PASSWORD|PGPASSWORD|SSH_AUTH_SOCK|AGY_DART_UI_TOKEN|AGY_SIDECAR_TOKEN|ANTIGRAVITY_(?:TOKEN|SECRET|API_KEY|AUTH|COOKIE))/i;
+
+/** Hard credential filter (always takes precedence over built-in and user-configured allowlists). */
+export function isSensitiveEnvKey(name) {
+  if (typeof name !== "string" || !name.trim()) return true;
+  return SENSITIVE_ENV_KEY_RE.test(name.trim());
+}
+
+/**
+ * Construct a minimal child-process environment from OS & language toolchain allowlists plus
+ * optional user-configured `execEnvAllowlist` names. Hard credential filtering always wins.
+ */
+export function buildSafeChildEnv(baseEnv = process.env, { allowlist = null, extraEnv = null } = {}) {
+  const effectiveAllowlist = Array.isArray(allowlist)
+    ? allowlist
+    : getEffectiveConfig().execEnvAllowlist || [];
+  const extraAllowedUpper = new Set();
+  const extraAllowedExact = new Set();
+  for (const name of effectiveAllowlist) {
+    if (typeof name !== "string") continue;
+    const clean = name.trim();
+    if (!clean) continue;
+    extraAllowedExact.add(clean);
+    extraAllowedUpper.add(clean.toUpperCase());
+  }
+
+  const out = {};
+  const isWin = process.platform === "win32";
+  if (baseEnv && typeof baseEnv === "object") {
+    for (const [k, v] of Object.entries(baseEnv)) {
+      if (v === undefined || v === null) continue;
+      if (isSensitiveEnvKey(k)) continue;
+      const upper = k.toUpperCase();
+      const allowedByDefault = SAFE_CHILD_ENV_ALLOWLIST.has(upper) || upper.startsWith("LC_");
+      const allowedByConfig = isWin ? extraAllowedUpper.has(upper) : extraAllowedExact.has(k);
+      if (allowedByDefault || allowedByConfig) {
+        out[k] = String(v);
+      }
+    }
+  }
+  if (extraEnv && typeof extraEnv === "object") {
+    for (const [k, v] of Object.entries(extraEnv)) {
+      if (v === undefined || v === null) continue;
+      out[k] = String(v);
+    }
+  }
+  return out;
+}
 
 /** Clamp execution timeout safely into [1s, 300s] */
 export function resolveExecTimeoutMs(timeoutMs, fallbackMs = DEFAULT_TIMEOUT_MS) {
@@ -246,7 +375,7 @@ export function runProcess({
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxBytes = 10 * 1024 * 1024,
-  env = process.env,
+  env = undefined,
   stdinData = null,
   windowsVerbatimArguments = false
 }) {
@@ -266,9 +395,13 @@ export function runProcess({
 
     let forceCloseTimer = null;
 
+    // Respect explicit `env` verbatim (including empty `{}`); default to sanitized allowlisted env.
+    const spawnEnv =
+      env !== undefined && env !== null ? { ...env } : buildSafeChildEnv(process.env);
+
     const child = spawn(cmd, args, {
       cwd: cwd || process.cwd(),
-      env: { ...process.env, ...env },
+      env: spawnEnv,
       detached: process.platform !== "win32",
       windowsHide: true,
       windowsVerbatimArguments: Boolean(windowsVerbatimArguments),
@@ -535,7 +668,7 @@ function buildNodeFileExecArgs(scriptPath, safeArgs) {
   return [...flags, scriptPath, ...safeArgs];
 }
 
-/** Execute code in specified runtime (nodejs, python, shell, pwsh, cmd) */
+/** Execute code in specified runtime (nodejs, python, shell, pwsh, cmd) as current OS user with allowlisted env */
 export async function executeCode({
   language = undefined,
   code = "",
@@ -543,7 +676,7 @@ export async function executeCode({
   args = [],
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  env = {}
+  env = undefined
 }) {
   const rawLang = typeof language === "string" ? language.trim() : "";
   const trimmedFile = typeof file === "string" ? file.trim() : "";
@@ -553,6 +686,7 @@ export async function executeCode({
   const normLang = (rawLang || inferredLang || "shell").toLowerCase();
   const workdir = cwd || process.cwd();
   const safeArgs = normalizeExecArgs(args);
+  const childEnv = env !== undefined && env !== null ? { ...env } : buildSafeChildEnv(process.env);
 
   // 1. Node.js
   if (normLang === "nodejs" || normLang === "node" || normLang === "javascript" || normLang === "js") {
@@ -563,7 +697,7 @@ export async function executeCode({
         args: buildNodeFileExecArgs(scriptPath, safeArgs),
         cwd: workdir,
         timeoutMs,
-        env
+        env: childEnv
       });
     }
     const evalTail = safeArgs.length > 0 ? ["--", "[eval]", ...safeArgs] : [];
@@ -575,7 +709,7 @@ export async function executeCode({
       args: nodeFlags,
       cwd: workdir,
       timeoutMs,
-      env
+      env: childEnv
     });
   }
 
@@ -585,7 +719,7 @@ export async function executeCode({
     const pyEnv = {
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
-      ...env
+      ...childEnv
     };
     if (trimmedFile) {
       const scriptPath = path.isAbsolute(trimmedFile) ? trimmedFile : path.resolve(workdir, trimmedFile);
@@ -623,7 +757,7 @@ export async function executeCode({
         rawBytes: 0
       };
     }
-    const cmdEnv = { ...env, __AGY_CMD_FILE: scriptPath };
+    const cmdEnv = { ...childEnv, __AGY_CMD_FILE: scriptPath };
     const argRefs = safeArgs.map((arg, idx) => {
       const key = `__AGY_CMD_ARG_${idx}`;
       cmdEnv[key] = arg;
@@ -649,7 +783,7 @@ export async function executeCode({
     return `${PS_UTF8_PRELUDE}\n${txt}`;
   };
   const invokePowerShellFileWithUtf8 = (bin, targetScriptPath) => {
-    const psEnv = { ...env, __AGY_PS_FILE: targetScriptPath };
+    const psEnv = { ...childEnv, __AGY_PS_FILE: targetScriptPath };
     const clearTargets = ["Env:__AGY_PS_FILE"];
     const psArgItems = safeArgs.map((arg, idx) => {
       const key = `__AGY_PS_ARG_${idx}`;
@@ -712,7 +846,7 @@ export async function executeCode({
         args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", withPsUtf8Prelude(psScript)],
         cwd: workdir,
         timeoutMs,
-        env
+        env: childEnv
       });
     }
     // Execute via ephemeral UTF-8-BOM .ps1 + UTF-8 console prelude wrapper so literal safeArgs and
@@ -723,7 +857,7 @@ export async function executeCode({
       fs.writeFileSync(tmpPs1, `\uFEFF${withPsUtf8Prelude(psScript)}`, { encoding: "utf8", mode: 0o600 });
       return await invokePowerShellFileWithUtf8(bin, tmpPs1);
     } catch {
-      const psEnv = { ...env, __AGY_PS_CODE: psScript };
+      const psEnv = { ...childEnv, __AGY_PS_CODE: psScript };
       const clearStmts = ["Remove-Item Env:__AGY_PS_CODE -ErrorAction SilentlyContinue"];
       const psArgItems = safeArgs.map((arg, idx) => {
         const key = `__AGY_PS_ARG_${idx}`;
@@ -771,7 +905,7 @@ export async function executeCode({
       args: ["/d", "/s", "/c", effectiveCode || ""],
       cwd: workdir,
       timeoutMs,
-      env
+      env: childEnv
     });
   }
 
@@ -794,7 +928,7 @@ export async function executeCode({
         args: [scriptPath, ...safeArgs],
         cwd: workdir,
         timeoutMs,
-        env
+        env: childEnv
       });
     }
     return runProcess({
@@ -802,7 +936,7 @@ export async function executeCode({
       args: safeArgs.length > 0 ? ["-c", effectiveCode || "", "--", ...safeArgs] : ["-c", effectiveCode || ""],
       cwd: workdir,
       timeoutMs,
-      env
+      env: childEnv
     });
   }
 }

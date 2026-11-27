@@ -4,9 +4,9 @@
 
 | Version | Supported |
 | :--- | :---: |
-| `1.7.x` | Yes |
-| `1.6.x` | Yes |
-| `< 1.6.0` | Upgrade recommended |
+| `1.9.x` | Yes |
+| `1.8.x` | Yes |
+| `< 1.8.0` | Upgrade recommended |
 
 ## Reporting a Vulnerability
 

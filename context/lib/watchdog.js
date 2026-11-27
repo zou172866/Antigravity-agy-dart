@@ -17,7 +17,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
-import { getEffectiveConfig, parseUiLang } from "./config.js";
+import { getConfigStatCount, getEffectiveConfig, parseUiLang, withConfigSnapshot } from "./config.js";
 import {
   getConversationViaApi,
   isConversationApiUnsupportedBackedOff,
@@ -1736,7 +1736,9 @@ export class WatchdogMonitor {
     this._lastIdleLeasePruneTs = 0;
     this._lastTtlNotifyGlobalTs = 0;
     this._fallbackPendingJump = null;
+    this._inConfigScope = false;
     this.statSyncCount = 0;
+    this.configStatCount = 0;
     this.tailReadCount = 0;
     this.notificationCount = 0;
     this.ttlNotificationCount = 0;
@@ -4013,7 +4015,24 @@ export class WatchdogMonitor {
     }
   }
 
+  _runScopedConfig(fn) {
+    if (this._inConfigScope) return fn();
+    const beforeCfgStats = getConfigStatCount();
+    this._inConfigScope = true;
+    try {
+      return withConfigSnapshot(fn);
+    } finally {
+      this._inConfigScope = false;
+      const delta = getConfigStatCount() - beforeCfgStats;
+      if (delta > 0) this.configStatCount += delta;
+    }
+  }
+
   tick() {
+    return this._runScopedConfig(() => this._tickWithScopedConfig());
+  }
+
+  _tickWithScopedConfig() {
     const nowWallMs = this.nowFn();
     const nowMonoNs = this.monoNsFn();
     const cfg = this.getConfig() || {};
@@ -5021,7 +5040,11 @@ export class WatchdogMonitor {
     };
   }
 
-  getStatus({ conversationId = "", scope = "conversation", refresh = true, includeRichRescue = true } = {}) {
+  getStatus(options = {}) {
+    return this._runScopedConfig(() => this._getStatusWithScopedConfig(options));
+  }
+
+  _getStatusWithScopedConfig({ conversationId = "", scope = "conversation", refresh = true, includeRichRescue = true } = {}) {
     const tickRes = refresh ? this.tick() : null;
     const nowWallMs = tickRes ? tickRes.serverNowMs : this.nowFn();
     const cfg = this.getConfig() || {};
@@ -5371,6 +5394,7 @@ export class WatchdogMonitor {
         suspectCount,
         stalledCount,
         statSyncCount: this.statSyncCount,
+        configStatCount: this.configStatCount,
         tailReadCount: this.tailReadCount,
         notificationCount: this.notificationCount,
         ttlNotificationCount: this.ttlNotificationCount,

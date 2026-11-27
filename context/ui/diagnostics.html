@@ -352,14 +352,37 @@ tr:last-child td { border-bottom: none; }
     postMessageRpc({ jsonrpc: "2.0", method, params: params || {} });
   }
 
-  let resizeQueued = false;
+  let resizeRafId = null;
+  let lastReportedWidth = 0;
+  let lastReportedHeight = 0;
+  function measureContentSize() {
+    let rect = null;
+    if (rootEl && typeof rootEl.getBoundingClientRect === "function") {
+      try { rect = rootEl.getBoundingClientRect(); } catch {}
+    }
+    const rawH =
+      (rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 0) ||
+      (rootEl && Number(rootEl.offsetHeight) > 0 ? Number(rootEl.offsetHeight) : 0) ||
+      (rootEl && Number(rootEl.scrollHeight) > 0 ? Number(rootEl.scrollHeight) : 0) ||
+      (document.documentElement && Number(document.documentElement.scrollHeight) > 0 ? Number(document.documentElement.scrollHeight) : 0) ||
+      160;
+    const rawW =
+      (rootEl && Number(rootEl.scrollWidth) > 0 ? Number(rootEl.scrollWidth) : 0) ||
+      (rect && Number.isFinite(rect.width) && rect.width > 0 ? rect.width : 0) ||
+      (rootEl && Number(rootEl.offsetWidth) > 0 ? Number(rootEl.offsetWidth) : 0) ||
+      (document.documentElement && Number(document.documentElement.scrollWidth) > 0 ? Number(document.documentElement.scrollWidth) : 0) ||
+      480;
+    return { width: Math.ceil(rawW), height: Math.ceil(rawH) };
+  }
   function reportSize() {
-    if (resizeQueued) return;
-    resizeQueued = true;
-    requestAnimationFrame(() => {
-      resizeQueued = false;
-      const height = Math.ceil(document.documentElement.scrollHeight || rootEl.offsetHeight || 160);
-      const width = Math.ceil(document.documentElement.scrollWidth || rootEl.offsetWidth || 480);
+    if (tornDown || resizeRafId !== null) return;
+    resizeRafId = requestAnimationFrame(() => {
+      resizeRafId = null;
+      if (tornDown) return;
+      const { width, height } = measureContentSize();
+      if (width === lastReportedWidth && height === lastReportedHeight) return;
+      lastReportedWidth = width;
+      lastReportedHeight = height;
       sendNotification("ui/notifications/size-changed", { width, height });
     });
   }
@@ -708,6 +731,12 @@ tr:last-child td { border-bottom: none; }
   function teardownResource() {
     if (tornDown) return;
     tornDown = true;
+    if (resizeRafId !== null) {
+      if (typeof cancelAnimationFrame === "function") {
+        try { cancelAnimationFrame(resizeRafId); } catch {}
+      }
+      resizeRafId = null;
+    }
     for (const [, p] of pending) {
       p.cancel();
     }
@@ -785,7 +814,7 @@ tr:last-child td { border-bottom: none; }
   window.addEventListener("message", onHostMessage);
 
   sendRequest("ui/initialize", {
-    appInfo: { name: "agy-dart-diagnostics", version: "1.9.3" },
+    appInfo: { name: "agy-dart-diagnostics", version: "1.9.4" },
     appCapabilities: {},
     protocolVersion: PROTOCOL_VERSION
   })

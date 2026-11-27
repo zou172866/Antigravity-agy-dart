@@ -127,13 +127,25 @@ export function manageFiles(home, host, specs, action) {
   const recordByKey = new Map();
   for (const [k, v] of Object.entries(records)) recordByKey.set(normPathKey(k), v);
   const specKeys = new Set(specs.map(s => normPathKey(s.file)));
-  const files = {};
+  const preservedOtherConfigs = {};
+  for (const [oldFile, rawOldRec] of Object.entries(records)) {
+    if (specKeys.has(normPathKey(oldFile))) continue;
+    if (findManagedSkillRoot(oldFile, home)) continue;
+    preservedOtherConfigs[oldFile] = rawOldRec;
+  }
+  const hasOtherProfiles = Object.keys(preservedOtherConfigs).length > 0;
+  const files = { ...preservedOtherConfigs };
   const pending = {};
   const changes = [];
   for (const spec of specs) {
     const file = spec.file;
-    const current = read(file);
+    const isSharedSkill = Boolean(findManagedSkillRoot(file, home));
     let previous = records[file] ?? recordByKey.get(normPathKey(file));
+    if (action === "uninstall" && isSharedSkill && hasOtherProfiles) {
+      if (previous) files[file] = previous;
+      continue;
+    }
+    const current = read(file);
     const currentHash = digest(current);
     if (previous?.transition?.from === currentHash) previous = previous.transition.record;
     if (action === "uninstall" && !previous) continue;
@@ -166,6 +178,10 @@ export function manageFiles(home, host, specs, action) {
     if (specKeys.has(normPathKey(oldFile))) continue;
     const skillRoot = findManagedSkillRoot(oldFile, home);
     if (!skillRoot) continue;
+    if (action === "uninstall" && hasOtherProfiles) {
+      files[oldFile] = rawOldRec;
+      continue;
+    }
     const current = read(oldFile);
     if (current === null) continue;
     let oldRec = rawOldRec;
@@ -207,7 +223,11 @@ export function manageFiles(home, host, specs, action) {
     if (Object.keys(pending).length) writeFileAtomicSync(stateFile, JSON.stringify({ version: 2, files }));
   } else {
     for (const change of changes) apply(change);
-    if (read(stateFile) !== null) fs.unlinkSync(stateFile);
+    if (hasOtherProfiles) {
+      writeFileAtomicSync(stateFile, JSON.stringify({ version: 2, files }));
+    } else if (read(stateFile) !== null) {
+      fs.unlinkSync(stateFile);
+    }
   }
 }
 function skillFileSpec(home, dir, src, relPosix) {

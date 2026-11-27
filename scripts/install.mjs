@@ -69,18 +69,16 @@ const MODES = {
   "no-read-hook": { cutoffBytes: 46080, readHook: false, label: "Ultra-fast Scheme B (command guard only, no read_file hook)" }
 };
 
+const PACKAGE_MANIFEST_URL = new URL("./package-manifest.json", import.meta.url);
+const PACKAGE_MANIFEST = JSON.parse(fsSync.readFileSync(PACKAGE_MANIFEST_URL, "utf8"));
+if (PACKAGE_MANIFEST?.schemaVersion !== 1) {
+  throw new Error(`Unsupported scripts/package-manifest.json schemaVersion: ${PACKAGE_MANIFEST?.schemaVersion}`);
+}
+
+export const PACKAGE_MANIFEST_SCHEMA_VERSION = PACKAGE_MANIFEST.schemaVersion;
 export const TOOL_LOADING_MODES = Object.freeze(["fast-eager", "lazy", "eager"]);
-export const FAST_MCP_TOOL_NAMES = Object.freeze(["apply_edits", "batch_search", "read_slices", "run_checks"]);
-export const CONTEXT_MCP_TOOL_NAMES = Object.freeze([
-  "ctx_batch",
-  "ctx_doctor",
-  "ctx_execute",
-  "ctx_index",
-  "ctx_purge",
-  "ctx_resume",
-  "ctx_search",
-  "ctx_stats"
-]);
+export const FAST_MCP_TOOL_NAMES = Object.freeze([...PACKAGE_MANIFEST.fastMcpTools]);
+export const CONTEXT_MCP_TOOL_NAMES = Object.freeze([...PACKAGE_MANIFEST.contextMcpTools]);
 
 function buildEagerToolsConfig(toolNames) {
   const tools = {};
@@ -178,82 +176,9 @@ export function buildHookBootstrapCommand(pluginName = PLUGIN_NAME, relScriptPat
   return `node -e /\\''/;${js};//'`;
 }
 
-export const RUNTIME_FILES = Object.freeze([
-  "plugin.json",
-  "mcp_config.json",
-  "hooks.json",
-  "package.json",
-  "LICENSE",
-  "SECURITY.md",
-  "THIRD_PARTY_NOTICES.md",
-  "assets/logo.svg",
-  "agents/dart-coder.md",
-  "agents/dart-reviewer.md",
-  "rules/AGENTS.md",
-  "skills/agy-dart/SKILL.md",
-  "skills/agy-dart/references/error-playbook.md",
-  "skills/agy-dart/examples/filters.json",
-  "skills/agy-dart/examples/ctx_trace_summary.py",
-  "fast/mcp-server.mjs",
-  "fast/session-start.mjs",
-  "context/server.js",
-  "context/ui/diagnostics.html",
-  "context/lib/config.js",
-  "context/lib/conversation-api.js",
-  "context/lib/code-outline.js",
-  "context/lib/store.js",
-  "context/lib/store/schema.js",
-  "context/lib/store/fts.js",
-  "context/lib/store/checkpoints.js",
-  "context/lib/store/reads.js",
-  "context/lib/store/settings-maintenance.js",
-  "context/lib/executor.js",
-  "context/lib/tools.js",
-  "context/lib/execution-receipts.js",
-  "context/lib/cache/profiles.js",
-  "context/lib/cache-analyzer.js",
-  "context/lib/repo-skeleton.js",
-  "context/lib/stable-json.js",
-  "context/lib/security.js",
-  "context/lib/text-diff.js",
-  "context/lib/json-crusher.js",
-  "context/lib/handoff.js",
-  "context/lib/safety-monitor-audit.js",
-  "context/lib/watchdog-lease.js",
-  "context/lib/watchdog.js",
-  "hooks/compile-cache.mjs",
-  "hooks/session-start.mjs",
-  "hooks/pre-tool-use.mjs",
-  "hooks/post-tool-use.mjs",
-  "hooks/pre-invocation.mjs",
-  "hooks/stop.mjs",
-  "hooks/cli-filter.mjs",
-  "hooks/filter-rules.mjs",
-  "dsh/plugin.mjs",
-  "sidecars/dashboard/sidecar.json",
-  "sidecars/dashboard/server.mjs",
-  "sidecars/dashboard/index.html",
-  "sidecars/dashboard/version-check.mjs",
-  "sidecars/dashboard/update-archive.mjs",
-  "sidecars/dashboard/version-update.mjs",
-  "scripts/install.mjs",
-  "scripts/targets/shared.mjs",
-  "scripts/targets/antigravity.mjs",
-  "scripts/targets/codex.mjs",
-  "scripts/targets/claude-code.mjs",
-  "scripts/targets/dsh.mjs",
-  "scripts/targets/index.mjs"
-]);
+export const RUNTIME_FILES = Object.freeze([...PACKAGE_MANIFEST.runtimeFiles]);
 
-export const DEVTOOLS_FILES = Object.freeze([
-  "bin/agy-dart.mjs",
-  "fast/benchmark.mjs",
-  "context/lib/cache-simulator.js",
-  "scripts/cache-audit.mjs",
-  "scripts/prefix-budget.mjs",
-  "scripts/verify-package-graph.mjs",
-  "scripts/gen-review-brief.mjs"
-]);
+export const DEVTOOLS_FILES = Object.freeze([...PACKAGE_MANIFEST.devtoolsFiles]);
 
 export const FILES_TO_COPY = Object.freeze([...RUNTIME_FILES, ...DEVTOOLS_FILES]);
 

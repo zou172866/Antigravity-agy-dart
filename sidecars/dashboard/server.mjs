@@ -836,14 +836,26 @@ function getStatsPayload(data, defaultConvId = "default") {
   stats.scope = scope;
   stats.conversationId = convId;
   stats.appStartTime = appStartTime;
-  stats.conversationCutoffBytes = store.getCutoff(convId);
-  stats.appCutoffBytes = store.getCutoff("app");
-  stats.globalCutoffBytes = store.getCutoff(null);
+  const readCutoffInfo = (sid) =>
+    typeof store.getCutoffInfo === "function"
+      ? store.getCutoffInfo(sid)
+      : { cutoffBytes: store.getCutoff(sid), source: "default", savedCutoffBytes: null, overriddenBy: null };
+  const convCutoffInfo = readCutoffInfo(convId);
+  const appCutoffInfo = readCutoffInfo("app");
+  const globalCutoffInfo = readCutoffInfo(null);
+  stats.conversationCutoffBytes = convCutoffInfo.cutoffBytes;
+  stats.appCutoffBytes = appCutoffInfo.cutoffBytes;
+  stats.globalCutoffBytes = globalCutoffInfo.cutoffBytes;
+  stats.conversationCutoffSource = convCutoffInfo.source;
+  stats.appCutoffSource = appCutoffInfo.source;
+  stats.globalCutoffSource = globalCutoffInfo.source;
+  stats.savedGlobalCutoffBytes = globalCutoffInfo.savedCutoffBytes ?? null;
   stats.hasConversationCutoffOverride = store.hasCutoffOverride(convId);
   stats.hasAppCutoffOverride = store.hasCutoffOverride("app");
-  stats.cutoffBytes = isLifetimeScope
-    ? stats.globalCutoffBytes
-    : (isAppScope ? stats.appCutoffBytes : stats.conversationCutoffBytes);
+  const activeCutoffInfo = isLifetimeScope ? globalCutoffInfo : (isAppScope ? appCutoffInfo : convCutoffInfo);
+  stats.cutoffBytes = activeCutoffInfo.cutoffBytes;
+  stats.cutoffSource = activeCutoffInfo.source;
+  stats.cutoffOverriddenBy = activeCutoffInfo.overriddenBy ?? null;
 
   stats.conversationExemptExtensions = store.getExemptExtensions(convId);
   stats.appExemptExtensions = store.getExemptExtensions("app");
@@ -880,9 +892,6 @@ function getStatsPayload(data, defaultConvId = "default") {
   stats.noiseMaxReadBytes = effCfg.noiseMaxReadBytes ?? 16384;
   stats.reviewMaxReadBytes = effCfg.reviewMaxReadBytes ?? 131072;
   stats.shellDumpMaxBytes = effCfg.shellDumpMaxBytes ?? 16384;
-  if (typeof store.getCutoffInfo === "function") {
-    stats.cutoffSource = store.getCutoffInfo(isLifetimeScope ? null : targetSid).source;
-  }
   stats.isPaused = store.isPaused(targetSid);
   stats.cliFilterEnabled = store.isCliFilterEnabled(targetSid);
   stats.readDedupEnabled = store.isReadDedupEnabled(targetSid);
@@ -2853,7 +2862,7 @@ function parseStrictCutoffBytes(raw) {
   return null;
 }
 
-function handleCutoffMutation(data, defaultConvId = "default") {
+export function handleCutoffMutation(data, defaultConvId = "default") {
   const store = getRuntimeStore();
   const { scope, targetSid, convId } = resolveTargetSession(data, defaultConvId);
   const cutoffBytes = parseStrictCutoffBytes(data?.cutoff);
@@ -2861,14 +2870,36 @@ function handleCutoffMutation(data, defaultConvId = "default") {
     return { ok: false, status: 400, error: "Invalid 'cutoff' value: must be a non-negative integer or 'none'" };
   }
   const saved = store.setCutoff(cutoffBytes, targetSid);
+  const isGlobalTarget = !targetSid || targetSid === "all" || targetSid === "lifetime";
+  const readCutoffInfo = (sid) =>
+    typeof store.getCutoffInfo === "function"
+      ? store.getCutoffInfo(sid)
+      : { cutoffBytes: store.getCutoff(sid), source: "sqlite:user", savedCutoffBytes: null, overriddenBy: null };
+  const effectiveInfo = readCutoffInfo(isGlobalTarget ? null : targetSid);
+  const globalInfo = readCutoffInfo(null);
+  const appInfo = readCutoffInfo("app");
+  const convInfo = readCutoffInfo(convId);
+  const overriddenBy =
+    effectiveInfo.overriddenBy ||
+    (isGlobalTarget && (effectiveInfo.source === "env" || effectiveInfo.source === "config")
+      ? effectiveInfo.source
+      : null);
   return {
     ok: true,
     cutoffBytes: saved,
+    savedCutoffBytes: saved,
+    effectiveCutoffBytes: effectiveInfo.cutoffBytes,
+    effectiveSource: effectiveInfo.source,
+    overriddenBy,
     scope,
     sessionId: targetSid,
-    globalCutoffBytes: store.getCutoff(null),
-    appCutoffBytes: store.getCutoff("app"),
-    conversationCutoffBytes: store.getCutoff(convId)
+    globalCutoffBytes: globalInfo.cutoffBytes,
+    globalCutoffSource: globalInfo.source,
+    savedGlobalCutoffBytes: globalInfo.savedCutoffBytes ?? (isGlobalTarget ? saved : null),
+    appCutoffBytes: appInfo.cutoffBytes,
+    appCutoffSource: appInfo.source,
+    conversationCutoffBytes: convInfo.cutoffBytes,
+    conversationCutoffSource: convInfo.source
   };
 }
 
@@ -3097,7 +3128,7 @@ export async function handlePluginUpdate(
   data = {},
   updater = getDefaultPluginUpdater(),
   onUpdated = null,
-  { automatic = false, store = null, nowIso = null } = {}
+  { automatic = false, store = null, nowIso = null, approvedAsset = null } = {}
 ) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return { ok: false, status: 400, error: "Request body must be a JSON object" };
@@ -3114,7 +3145,13 @@ export async function handlePluginUpdate(
   let result;
   _updateInFlight = true;
   try {
-    result = await updater(parsed.version);
+    result = automatic
+      ? await updater(parsed.version, {
+          automatic: true,
+          requireVerifiedAsset: true,
+          ...(approvedAsset ? { expectedAsset: approvedAsset } : {})
+        })
+      : await updater(parsed.version);
   } finally {
     _updateInFlight = false;
   }
@@ -3248,11 +3285,19 @@ export async function runAutoUpdateCycle({
       return { ok: true, action: "checked", release, autoInstallSkipped: eligibility.skipReason };
     }
 
+    const approvedAsset = {
+      version: eligibility.targetVersion,
+      releaseTag: typeof release.releaseTag === "string" ? release.releaseTag.trim() : "",
+      assetName: typeof release.assetName === "string" ? release.assetName.trim() : "",
+      assetUrl: typeof release.assetUrl === "string" ? release.assetUrl.trim() : "",
+      assetSha256: typeof release.assetSha256 === "string" ? release.assetSha256.trim().toLowerCase() : ""
+    };
+
     const updRes = await handlePluginUpdate(
       { version: eligibility.targetVersion },
       updater,
       onUpdated,
-      { automatic: true, store, nowIso }
+      { automatic: true, store, nowIso, approvedAsset }
     );
     if (updRes?.status === "updated") {
       return { ok: true, action: "updated", result: updRes };

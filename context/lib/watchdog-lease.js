@@ -1881,37 +1881,87 @@ const SUMMARY_RECENT_TIME_COLUMNS = [
   "created_at"
 ];
 
+function isSqliteLockError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  const code = String(err?.code || err?.errcode || "").toLowerCase();
+  return (
+    msg.includes("database is locked") ||
+    msg.includes("database is busy") ||
+    msg.includes("sqlite_busy") ||
+    msg.includes("sqlite_locked") ||
+    code.includes("busy") ||
+    code.includes("locked")
+  );
+}
+
 /**
- * Bounded O(1) lookup of the most recently active conversation IDs from a sibling
- * `conversation_summaries.db` alongside a `brain/` directory (used to avoid O(N)
- * `brain/` scans under unlimited history while keeping `cache-analyzer.js` SQLite-free).
+ * Bounded lookup of recently active conversation IDs from a sibling `conversation_summaries.db`
+ * alongside a `brain/` directory, honoring a shared wall-clock deadline and reporting
+ * lock/budget degradation and ordering precision (`indexed_time` | `small_table_time` | `rowid_heuristic`).
  */
-export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates = 32) {
-  if (!brainRoot || typeof brainRoot !== "string") return [];
+export function queryRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates = 32, options = {}) {
+  if (!brainRoot || typeof brainRoot !== "string") {
+    return { ids: [], status: "missing", precision: "none" };
+  }
   const resolvedRoot = path.resolve(brainRoot);
-  if (path.basename(resolvedRoot).toLowerCase() !== "brain") return [];
+  if (path.basename(resolvedRoot).toLowerCase() !== "brain") {
+    return { ids: [], status: "missing", precision: "none" };
+  }
   const agRoot = path.dirname(resolvedRoot);
-  if (!agRoot || agRoot === resolvedRoot) return [];
+  if (!agRoot || agRoot === resolvedRoot) {
+    return { ids: [], status: "missing", precision: "none" };
+  }
   const summaryDbPath = path.join(agRoot, "conversation_summaries.db");
   const limit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) >= 1
     ? Math.min(200, Math.floor(Number(maxCandidates)))
     : 32;
+  const deadlineMs = Number.isFinite(Number(options?.deadlineMs)) ? Number(options.deadlineMs) : null;
+  const remainingMs = () => (deadlineMs === null ? 150 : deadlineMs - Date.now());
+  if (deadlineMs !== null && remainingMs() <= 0) {
+    return { ids: [], status: "budget_exhausted", precision: "none" };
+  }
+
   let db = null;
   try {
-    if (!fs.existsSync(summaryDbPath)) return [];
+    if (!fs.existsSync(summaryDbPath)) {
+      return { ids: [], status: "missing", precision: "none" };
+    }
+    const remOpen = remainingMs();
+    if (deadlineMs !== null && remOpen <= 0) {
+      return { ids: [], status: "budget_exhausted", precision: "none" };
+    }
+    const perOpTimeoutMs = Math.max(1, Math.min(40, Math.floor(remOpen)));
     const DatabaseSync = getLazyDatabaseSync();
     try {
-      db = new DatabaseSync(summaryDbPath, { readOnly: true, timeout: 150 });
+      db = new DatabaseSync(summaryDbPath, { readOnly: true, timeout: perOpTimeoutMs });
     } catch {
       db = new DatabaseSync(summaryDbPath, { readOnly: true });
     }
+
+    const syncBusyTimeout = () => {
+      if (deadlineMs === null) return true;
+      const rem = remainingMs();
+      if (rem <= 0) return false;
+      const stepTimeout = Math.max(1, Math.min(35, Math.floor(rem)));
+      try {
+        db.exec(`PRAGMA busy_timeout = ${stepTimeout}`);
+      } catch {}
+      return true;
+    };
+
+    if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
     const cols = db.prepare("PRAGMA table_info(conversation_summaries)").all();
     const colNames = new Set((cols || []).map((c) => String(c?.name || "").toLowerCase()));
-    if (!colNames.has("conversation_id")) return [];
+    if (!colNames.has("conversation_id")) {
+      return { ids: [], status: "ok", precision: "none" };
+    }
+
     const indexedLeadingCols = new Set();
+    if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
     try {
       const idxList = db.prepare("PRAGMA index_list(conversation_summaries)").all();
       for (const idx of idxList || []) {
+        if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
         const idxName = typeof idx?.name === "string" ? idx.name : "";
         if (!idxName) continue;
         try {
@@ -1921,16 +1971,23 @@ export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates 
           if (first && typeof first.name === "string") {
             indexedLeadingCols.add(first.name.toLowerCase());
           }
-        } catch {}
+        } catch (idxErr) {
+          if (isSqliteLockError(idxErr)) throw idxErr;
+        }
       }
-    } catch {}
+    } catch (listErr) {
+      if (isSqliteLockError(listErr)) throw listErr;
+    }
+
     const indexedTimeCol = SUMMARY_RECENT_TIME_COLUMNS.find(
       (c) => colNames.has(c) && indexedLeadingCols.has(c)
     );
     let orderCol = indexedTimeCol || "rowid";
+    let precision = indexedTimeCol ? "indexed_time" : "rowid_heuristic";
     if (!indexedTimeCol) {
       const plainTimeCol = SUMMARY_RECENT_TIME_COLUMNS.find((c) => colNames.has(c));
       if (plainTimeCol) {
+        if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
         // Allow unindexed ORDER BY only on small tables (<= 256 rows); large unindexed tables
         // stay O(log N) via `rowid DESC` without triggering a full-table temp B-tree sort.
         const isLargeTable = Boolean(
@@ -1938,15 +1995,21 @@ export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates 
         );
         if (!isLargeTable) {
           orderCol = plainTimeCol;
+          precision = "small_table_time";
         }
       }
     }
+
+    if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
     let rows;
     try {
       rows = db
         .prepare(`SELECT conversation_id FROM conversation_summaries ORDER BY ${orderCol} DESC LIMIT ?`)
         .all(limit);
-    } catch {
+    } catch (selErr) {
+      if (isSqliteLockError(selErr)) throw selErr;
+      if (!syncBusyTimeout()) return { ids: [], status: "budget_exhausted", precision: "none" };
+      precision = "rowid_heuristic";
       rows = db
         .prepare("SELECT conversation_id FROM conversation_summaries LIMIT ?")
         .all(limit);
@@ -1956,9 +2019,12 @@ export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates 
       const cid = sanitizeConversationId(row?.conversation_id);
       if (cid) out.push(cid);
     }
-    return out;
-  } catch {
-    return [];
+    return { ids: out, status: "ok", precision };
+  } catch (err) {
+    if (isSqliteLockError(err)) {
+      return { ids: [], status: "locked", precision: "none" };
+    }
+    return { ids: [], status: "error", precision: "none" };
   } finally {
     if (db) {
       try {
@@ -1966,6 +2032,15 @@ export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates 
       } catch {}
     }
   }
+}
+
+/**
+ * Bounded O(1) lookup of the most recently active conversation IDs from a sibling
+ * `conversation_summaries.db` alongside a `brain/` directory (used to avoid O(N)
+ * `brain/` scans under unlimited history while keeping `cache-analyzer.js` SQLite-free).
+ */
+export function listRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates = 32, options = {}) {
+  return queryRecentConversationIdsFromSummaryDb(brainRoot, maxCandidates, options).ids;
 }
 
 function firstNonEmptyString(...values) {

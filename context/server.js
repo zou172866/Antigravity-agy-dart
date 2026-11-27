@@ -12,7 +12,7 @@ try {
   enableVersionedCompileCache();
 } catch {}
 
-const [{ stableSortObject }, { ContextModeStore }, { createTools, normalizeSessionId }, { getEffectiveConfig }, handoffMod] = await Promise.all([
+const [{ stableSortObject }, { ContextModeStore }, { createTools, enforceToolCallWireBudget, normalizeSessionId }, { getEffectiveConfig }, handoffMod] = await Promise.all([
   import("./lib/stable-json.js"),
   import("./lib/store.js"),
   import("./lib/tools.js"),
@@ -604,6 +604,12 @@ function requestClientRootsList(timeoutMs = 1000) {
   return trackedPromise;
 }
 
+const MAX_TOOL_CALL_WIRE_BYTES = 8800;
+
+function sendToolCallResponse(id, response) {
+  sendResponse(id, enforceToolCallWireBudget(id, response, MAX_TOOL_CALL_WIRE_BYTES));
+}
+
 function sendResponse(id, result) {
   sendJsonRpc({ jsonrpc: "2.0", id, result });
 }
@@ -852,7 +858,7 @@ rl.on("line", async (line) => {
           const timeoutMs = resolveRootsTimeoutCtx(clientSupportsRoots ? 2500 : 400);
           const rootsRes = await requestClientRootsList(timeoutMs);
           if (rootsEpoch !== epoch) {
-            sendResponse(id, {
+            sendToolCallResponse(id, {
               isError: true,
               content: [{ type: "text", text: "Workspace roots changed during this call. Retry with the active workspace in 'cwd'." }]
             });
@@ -914,12 +920,12 @@ rl.on("line", async (line) => {
             },
             () => tools[toolName](toolArgs)
           );
-          sendResponse(
+          sendToolCallResponse(
             id,
             formatToolCallResponse(toolName, result, { uiSupported: clientSupportsMcpUi })
           );
         } catch (toolErr) {
-          sendResponse(id, {
+          sendToolCallResponse(id, {
             content: [
               {
                 type: "text",

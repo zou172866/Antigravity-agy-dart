@@ -36,6 +36,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
   maxLineRange: null,
   maxOutputBytes: 8100,
   execTimeoutMs: 120000,
+  execEnvAllowlist: Object.freeze([]),
   cliFilter: true,
   cliFilterAsyncBypassMs: 2000,
   outlineDb: true,
@@ -98,6 +99,13 @@ let cachedFileState = {
   data: null,
   error: null
 };
+
+let activeScopedSnapshot = null;
+let configStatCount = 0;
+
+export function getConfigStatCount() {
+  return configStatCount;
+}
 
 export function getConfigPath(env = process.env) {
   const custom = typeof env?.AGY_DART_CONFIG_PATH === "string" ? env.AGY_DART_CONFIG_PATH.trim() : "";
@@ -279,14 +287,50 @@ function parseSafetyLogPaths(raw) {
   return out;
 }
 
+function parseEnvNameList(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  let items = [];
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    items = trimmed.split(/[\s,;]+/);
+  } else {
+    return undefined;
+  }
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (typeof item !== "string") continue;
+    const clean = item.trim();
+    if (!clean || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(clean)) continue;
+    const key = process.platform === "win32" ? clean.toUpperCase() : clean;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(clean);
+      if (out.length >= 64) break;
+    }
+  }
+  return out;
+}
+
 export function loadConfigFile(configPath = getConfigPath()) {
   const resolved = path.resolve(configPath);
+  let stat;
   try {
-    if (!fs.existsSync(resolved)) {
+    configStatCount += 1;
+    stat = fs.statSync(resolved);
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") {
       cachedFileState = { path: resolved, exists: false, mtimeMs: -1, size: -1, data: {}, error: null };
       return { exists: false, data: {}, error: null, path: resolved };
     }
-    const stat = fs.statSync(resolved);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    cachedFileState = { path: resolved, exists: true, mtimeMs: -1, size: -1, data: {}, error: errMsg };
+    return { exists: true, data: {}, error: errMsg, path: resolved };
+  }
+  try {
     if (
       cachedFileState.path === resolved &&
       cachedFileState.exists &&
@@ -318,6 +362,58 @@ export function loadConfigFile(configPath = getConfigPath()) {
 
 export function resetConfigCache() {
   cachedFileState = { path: null, exists: false, mtimeMs: -1, size: -1, data: null, error: null };
+  activeScopedSnapshot = null;
+}
+
+/**
+ * Execute a synchronous callback with a single shared config snapshot so repeated
+ * `getConfigSnapshot()` / `getEffectiveConfig()` lookups inside one tick or request
+ * reuse the same snapshot without repeating `fs.statSync` on `config.json`.
+ * Lazy by default: performs 0 stats if the callback never reads default config.
+ */
+export function withConfigSnapshot(optionsOrFn, maybeFn) {
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  const opts =
+    typeof optionsOrFn === "function"
+      ? {}
+      : optionsOrFn && typeof optionsOrFn === "object"
+        ? optionsOrFn
+        : {};
+  if (typeof fn !== "function") {
+    throw new TypeError("withConfigSnapshot requires a callback function");
+  }
+  const isPrebuiltSnap = Boolean(
+    opts &&
+      typeof opts.configPath === "string" &&
+      opts.values &&
+      typeof opts.values === "object" &&
+      opts.sources &&
+      typeof opts.sources === "object"
+  );
+  const env = isPrebuiltSnap ? process.env : opts.env || process.env;
+  if (!isPrebuiltSnap && !opts.fresh && !opts.configPath && activeScopedSnapshot && activeScopedSnapshot.env === env) {
+    return fn(activeScopedSnapshot.snapshot);
+  }
+  const prev = activeScopedSnapshot;
+  const scope = isPrebuiltSnap
+    ? { env, configPath: opts.configPath, snapshot: opts, lazy: false }
+    : opts.eager === true
+      ? (() => {
+          const snap = getConfigSnapshot({ ...opts, env, fresh: true });
+          return { env, configPath: snap.configPath, snapshot: snap, lazy: false };
+        })()
+      : {
+          env,
+          configPath: opts.configPath ? path.resolve(opts.configPath) : null,
+          snapshot: null,
+          lazy: true
+        };
+  activeScopedSnapshot = scope;
+  try {
+    return fn(scope.snapshot);
+  } finally {
+    activeScopedSnapshot = prev;
+  }
 }
 
 /**
@@ -326,12 +422,22 @@ export function resetConfigCache() {
 export function getConfigSnapshot(options = {}) {
   const env = options.env || process.env;
   const configPath = options.configPath ? path.resolve(options.configPath) : getConfigPath(env);
+  if (
+    !options.fresh &&
+    activeScopedSnapshot &&
+    activeScopedSnapshot.env === env &&
+    activeScopedSnapshot.snapshot &&
+    activeScopedSnapshot.configPath === configPath
+  ) {
+    return activeScopedSnapshot.snapshot;
+  }
   const loaded = loadConfigFile(configPath);
   const cfg = loaded.data || {};
   const values = {
     ...CONFIG_DEFAULTS,
     exemptExtensions: [],
     exemptPaths: [],
+    execEnvAllowlist: [],
     safetyLogPaths: []
   };
   const sources = {};
@@ -452,6 +558,11 @@ export function getConfigSnapshot(options = {}) {
     "execTimeoutMs",
     clampInt(parsePositiveInt(env?.AGY_DART_EXEC_TIMEOUT_MS), 1000, 300000),
     clampInt(parsePositiveInt(cfg.execTimeoutMs), 1000, 300000)
+  );
+  pick(
+    "execEnvAllowlist",
+    parseEnvNameList(env?.AGY_DART_EXEC_ENV_ALLOWLIST),
+    parseEnvNameList(cfg.execEnvAllowlist)
   );
 
   // 4. CLI filter & fast MCP caches
@@ -721,13 +832,25 @@ export function getConfigSnapshot(options = {}) {
   );
   pick("uiLang", parseUiLang(env?.AGY_DART_LANG), parseUiLang(cfg.uiLang));
 
-  return {
+  const snapshot = {
     configPath: loaded.path,
     fileExists: loaded.exists,
     configError: loaded.error,
     values,
     sources
   };
+  if (
+    !options.fresh &&
+    activeScopedSnapshot &&
+    activeScopedSnapshot.lazy &&
+    activeScopedSnapshot.env === env &&
+    !activeScopedSnapshot.snapshot &&
+    (!activeScopedSnapshot.configPath || activeScopedSnapshot.configPath === snapshot.configPath)
+  ) {
+    activeScopedSnapshot.configPath = snapshot.configPath;
+    activeScopedSnapshot.snapshot = snapshot;
+  }
+  return snapshot;
 }
 
 export function getEffectiveConfig(options = {}) {

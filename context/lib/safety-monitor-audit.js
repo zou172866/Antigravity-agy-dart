@@ -829,24 +829,51 @@ export function parseSafetyLogLines(lines, options = {}) {
   return state;
 }
 
+const MAX_PENDING_LINE_BYTES = 64 * 1024;
+const EMPTY_BUF = Buffer.alloc(0);
+const RECOGNIZED_GLOG_LINE_RE = /^(?:ERROR:\s+logging before google\.Init:\s*)?[IWEF]\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+/;
+
+function isRecognizedSafetyLogLine(line) {
+  if (!line) return false;
+  return (
+    RECOGNIZED_GLOG_LINE_RE.test(line) ||
+    DEFAULT_LOG_PATTERNS.isoTimestamp.test(line) ||
+    fastMatchesSafetyPrefilter(line)
+  );
+}
+
 function scanFileIncremental(fileMeta, state, options) {
   const cursor = state.files[fileMeta.key] || null;
   const maxColdScanBytes = Number(options.maxColdScanBytes || DEFAULT_SAFETY_CONFIG.maxColdScanBytes);
   const chunkBytes = Number(options.readChunkBytes || DEFAULT_SAFETY_CONFIG.readChunkBytes);
+  const maxPendingLineBytes =
+    Number.isFinite(Number(options.maxPendingLineBytes)) && Number(options.maxPendingLineBytes) >= 256
+      ? Math.floor(Number(options.maxPendingLineBytes))
+      : MAX_PENDING_LINE_BYTES;
+  const flushEof = Boolean(options.flushEof);
 
   if (
+    !flushEof &&
     cursor &&
     cursor.size === fileMeta.size &&
     cursor.mtimeMs === fileMeta.mtimeMs &&
     (cursor.ino === 0 || fileMeta.ino === 0 || cursor.ino === fileMeta.ino)
   ) {
-    return { bytesScanned: 0, cacheHit: true, truncatedRestart: false };
+    return {
+      bytesScanned: 0,
+      cacheHit: true,
+      truncatedRestart: false,
+      recognizedLines: Number(cursor.recognizedLines || 0),
+      oversizedLinesSkipped: Number(cursor.oversizedLinesSkipped || 0)
+    };
   }
 
   let startOffset = 0;
   let truncatedRestart = false;
-  let carry = "";
   let prevInFlight = null;
+  let oversizedSkipActive = false;
+  let recognizedLines = 0;
+  let oversizedLinesSkipped = 0;
 
   if (cursor) {
     const inodeChanged = cursor.ino > 0 && fileMeta.ino > 0 && cursor.ino !== fileMeta.ino;
@@ -854,13 +881,17 @@ function scanFileIncremental(fileMeta, state, options) {
     if (inodeChanged || sizeShrank) {
       truncatedRestart = true;
       startOffset = 0;
-      carry = "";
       prevInFlight = null;
+      oversizedSkipActive = false;
+      recognizedLines = 0;
+      oversizedLinesSkipped = 0;
       state.restartTruncationsDetected = (state.restartTruncationsDetected || 0) + 1;
     } else {
       startOffset = cursor.offset;
-      carry = typeof cursor.carryTail === "string" ? cursor.carryTail : "";
       prevInFlight = cursor.inFlight && typeof cursor.inFlight === "object" ? cursor.inFlight : null;
+      oversizedSkipActive = Boolean(cursor.oversizedSkipActive);
+      recognizedLines = Number(cursor.recognizedLines || 0);
+      oversizedLinesSkipped = Number(cursor.oversizedLinesSkipped || 0);
     }
   }
 
@@ -868,21 +899,23 @@ function scanFileIncremental(fileMeta, state, options) {
   if (startOffset === 0 && fileMeta.size > maxColdScanBytes) {
     startOffset = fileMeta.size - maxColdScanBytes;
     skipFirstPartial = true;
-    carry = "";
     prevInFlight = null;
+    oversizedSkipActive = false;
   }
 
   const totalToRead = Math.max(0, fileMeta.size - startOffset);
   if (totalToRead === 0) {
     state.files[fileMeta.key] = {
-      offset: fileMeta.size,
+      offset: startOffset,
       size: fileMeta.size,
       mtimeMs: fileMeta.mtimeMs,
       ino: fileMeta.ino,
-      carryTail: carry.slice(0, 4096),
+      recognizedLines,
+      oversizedLinesSkipped,
+      ...(oversizedSkipActive ? { oversizedSkipActive: true } : {}),
       ...(prevInFlight ? { inFlight: prevInFlight } : {})
     };
-    return { bytesScanned: 0, cacheHit: false, truncatedRestart };
+    return { bytesScanned: 0, cacheHit: false, truncatedRestart, recognizedLines, oversizedLinesSkipped };
   }
 
   const refNowMs = Math.max(Number(options.nowMs) || 0, Number(fileMeta.mtimeMs) || 0);
@@ -941,14 +974,32 @@ function scanFileIncremental(fileMeta, state, options) {
     tidStaleMs
   };
 
+  const processCompleteLineBuffer = (lineBuf) => {
+    let trimmedBuf = lineBuf;
+    if (trimmedBuf.length > 0 && trimmedBuf[trimmedBuf.length - 1] === 0x0d) {
+      trimmedBuf = trimmedBuf.subarray(0, trimmedBuf.length - 1);
+    }
+    if (trimmedBuf.length === 0) return;
+    const line = trimmedBuf.toString("utf8");
+    if (isRecognizedSafetyLogLine(line)) {
+      recognizedLines += 1;
+    }
+    if (!fastMatchesSafetyPrefilter(line)) return;
+    const records = splitInterleavedGlogLine(line);
+    for (let j = 0; j < records.length; j++) {
+      processNormalizedRecord(records[j], state, ctx);
+    }
+  };
+
   let fd = null;
   let bytesReadTotal = 0;
   try {
     fd = fs.openSync(fileMeta.path, "r");
     const buf = Buffer.allocUnsafe(Math.min(chunkBytes, Math.max(4096, totalToRead)));
-    const decoder = new StringDecoder("utf8");
     let pos = startOffset;
+    let committedOffset = startOffset;
     let remaining = totalToRead;
+    let pendingBuf = EMPTY_BUF;
 
     while (remaining > 0) {
       const toRead = Math.min(buf.length, remaining);
@@ -958,34 +1009,61 @@ function scanFileIncremental(fileMeta, state, options) {
       remaining -= n;
       bytesReadTotal += n;
 
-      const text = carry + decoder.write(buf.subarray(0, n));
-      const lines = text.split(/\r?\n/);
-      carry = lines.pop() ?? "";
+      const slice = buf.subarray(0, n);
+      let segStart = 0;
+      while (segStart < n) {
+        const nlIdx = slice.indexOf(0x0a, segStart);
+        if (nlIdx < 0) break;
+        const segLen = nlIdx - segStart;
+        const totalLineBytes = pendingBuf.length + segLen + 1;
+        committedOffset += totalLineBytes;
 
-      for (let i = 0; i < lines.length; i++) {
-        if (skipFirstPartial) {
+        if (oversizedSkipActive) {
+          oversizedSkipActive = false;
+          pendingBuf = EMPTY_BUF;
+        } else if (skipFirstPartial) {
           skipFirstPartial = false;
-          continue;
+          pendingBuf = EMPTY_BUF;
+        } else {
+          const lineBuf =
+            pendingBuf.length > 0
+              ? Buffer.concat([pendingBuf, slice.subarray(segStart, nlIdx)], pendingBuf.length + segLen)
+              : slice.subarray(segStart, nlIdx);
+          pendingBuf = EMPTY_BUF;
+          if (lineBuf.length > maxPendingLineBytes) {
+            oversizedLinesSkipped += 1;
+          } else {
+            processCompleteLineBuffer(lineBuf);
+          }
         }
-        const line = lines[i];
-        if (!line || !fastMatchesSafetyPrefilter(line)) continue;
-        const records = splitInterleavedGlogLine(line);
-        for (let j = 0; j < records.length; j++) {
-          processNormalizedRecord(records[j], state, ctx);
+        segStart = nlIdx + 1;
+      }
+
+      if (segStart < n) {
+        const tailSlice = slice.subarray(segStart, n);
+        if (oversizedSkipActive) {
+          committedOffset += tailSlice.length;
+        } else if (pendingBuf.length + tailSlice.length > maxPendingLineBytes) {
+          oversizedSkipActive = true;
+          oversizedLinesSkipped += 1;
+          committedOffset += pendingBuf.length + tailSlice.length;
+          pendingBuf = EMPTY_BUF;
+        } else {
+          pendingBuf =
+            pendingBuf.length > 0
+              ? Buffer.concat([pendingBuf, tailSlice], pendingBuf.length + tailSlice.length)
+              : Buffer.from(tailSlice);
         }
       }
     }
 
-    carry += decoder.end();
-    // Flush trailing complete-looking line at EOF if file isn't mid-write (only keep short tail in carry)
-    if (carry && !skipFirstPartial && (fileMeta.kind !== "desktop_language_server" || carry.endsWith("\n") || carry.length > 0)) {
-      if (fastMatchesSafetyPrefilter(carry)) {
-        const records = splitInterleavedGlogLine(carry);
-        for (let j = 0; j < records.length; j++) {
-          processNormalizedRecord(records[j], state, ctx);
-        }
-      }
-      carry = "";
+    // Only commit an unterminated trailing EOF line during one-shot stateless static scans (`--no-state`).
+    // Stateful live incremental polling leaves `offset` at `committedOffset` (the exact byte after the last `\n`)
+    // so split writes and split multi-byte UTF-8 sequences are re-read cleanly once terminated.
+    if (flushEof && pendingBuf.length > 0 && !skipFirstPartial && !oversizedSkipActive) {
+      committedOffset += pendingBuf.length;
+      processCompleteLineBuffer(pendingBuf);
+      pendingBuf = EMPTY_BUF;
     }
 
     const persistRefMs = Math.max(refNowMs, Number(ctx.lastTsMs) || 0);
@@ -1024,11 +1102,13 @@ function scanFileIncremental(fileMeta, state, options) {
         : undefined;
 
     state.files[fileMeta.key] = {
-      offset: pos,
+      offset: committedOffset,
       size: fileMeta.size,
       mtimeMs: fileMeta.mtimeMs,
       ino: fileMeta.ino,
-      carryTail: carry.slice(0, 4096),
+      recognizedLines,
+      oversizedLinesSkipped,
+      ...(oversizedSkipActive ? { oversizedSkipActive: true } : {}),
       ...(inFlight ? { inFlight } : {})
     };
   } catch {
@@ -1041,7 +1121,7 @@ function scanFileIncremental(fileMeta, state, options) {
     }
   }
 
-  return { bytesScanned: bytesReadTotal, cacheHit: false, truncatedRestart };
+  return { bytesScanned: bytesReadTotal, cacheHit: false, truncatedRestart, recognizedLines, oversizedLinesSkipped };
 }
 
 function resolveDefaultStatePath(cfg, env = process.env, homeDir = os.homedir()) {
@@ -1180,6 +1260,7 @@ function computeConsecutiveLargeFalseAlarms(events, stickyCharThreshold) {
 
 function classifySafetyStatus({
   filesDiscovered,
+  parseStatus = "recognized",
   agg,
   recentHeavyWindow,
   recentHeavy15m,
@@ -1209,6 +1290,16 @@ function classifySafetyStatus({
   }
 
   if (totalSafetyEvents === 0) {
+    if (parseStatus === "unrecognized_format") {
+      return {
+        status: "no_safety_events",
+        severity: "none",
+        verdictCode: "UNRECOGNIZED_LOG_FORMAT",
+        summaryEn: `Logs scanned (${filesDiscovered} file(s)), but no recognized Antigravity log format was detected — zero events cannot be confirmed.`,
+        summaryZh: `已扫描 ${filesDiscovered} 份日志，但未识别到已知 Antigravity 日志格式，尚不能判定为零事件。`,
+        actions: []
+      };
+    }
     return {
       status: "no_safety_events",
       severity: "none",
@@ -1424,17 +1515,25 @@ export function auditSafetyMonitor(options = {}) {
   let bytesScanned = 0;
   let cacheHits = 0;
   let filesScanned = 0;
+  let totalRecognizedLines = 0;
+  let totalOversizedLinesSkipped = 0;
+  let totalDiscoveredBytes = 0;
   let mutated = false;
 
   for (const fileMeta of discovery.files) {
+    totalDiscoveredBytes += Number(fileMeta.size || 0);
     const res = scanFileIncremental(fileMeta, state, {
       nowMs,
       stickyCharThreshold,
       maxColdScanBytes: options.maxColdScanBytes || DEFAULT_SAFETY_CONFIG.maxColdScanBytes,
-      readChunkBytes: options.readChunkBytes || DEFAULT_SAFETY_CONFIG.readChunkBytes
+      readChunkBytes: options.readChunkBytes || DEFAULT_SAFETY_CONFIG.readChunkBytes,
+      maxPendingLineBytes: options.maxPendingLineBytes,
+      flushEof: !persistState
     });
     filesScanned += 1;
     bytesScanned += res.bytesScanned;
+    totalRecognizedLines += Number(res.recognizedLines || 0);
+    totalOversizedLinesSkipped += Number(res.oversizedLinesSkipped || 0);
     if (res.cacheHit) cacheHits += 1;
     if (res.bytesScanned > 0 || res.truncatedRestart) mutated = true;
   }
@@ -1457,8 +1556,24 @@ export function auditSafetyMonitor(options = {}) {
   const recentHeavyBurst = recentHeavyInWindow.filter((e) => e.ts >= burstCutoffMs);
   const recentHeavy15m = recentHeavyInWindow.filter((e) => e.ts >= fifteenMinCutoffMs);
 
+  const totalSafetyEvents =
+    agg.stage1Total +
+    agg.precheckCalls +
+    agg.heavyCalls +
+    agg.rateLimit429Count +
+    agg.fallbackEscalationCount;
+  const parseStatus =
+    discovery.files.length === 0
+      ? "not_detected"
+      : totalSafetyEvents > 0 || totalRecognizedLines > 0
+        ? "recognized"
+        : totalDiscoveredBytes === 0
+          ? "empty"
+          : "unrecognized_format";
+
   const verdict = classifySafetyStatus({
     filesDiscovered: discovery.files.length,
+    parseStatus,
     agg,
     recentHeavyWindow: recentHeavyBurst,
     recentHeavy15m,
@@ -1557,6 +1672,9 @@ export function auditSafetyMonitor(options = {}) {
       filesScanned,
       bytesScanned,
       cacheHits,
+      parseStatus,
+      recognizedLines: totalRecognizedLines,
+      oversizedLinesSkipped: totalOversizedLinesSkipped,
       statePersisted: persistState,
       restartTruncationsDetected: Number(state.restartTruncationsDetected || 0),
       lastDesktopRestart: discovery.lastDesktopRestart,

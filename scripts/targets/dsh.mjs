@@ -12,19 +12,29 @@ function yamlStr(value) {
   return "'" + String(value).replaceAll("'", "''") + "'";
 }
 
-function readRecordedProfile(home) {
+export function listRecordedProfiles(home) {
+  const found = [];
+  const seen = new Set();
   try {
     const raw = read(path.join(home, ".agy-dart", "dsh-install.json"));
-    if (!raw) return null;
+    if (!raw) return found;
     const parsed = JSON.parse(raw);
     const files = parsed?.version === 2 ? parsed.files : parsed;
-    if (!files || typeof files !== "object") return null;
+    if (!files || typeof files !== "object") return found;
     for (const filePath of Object.keys(files)) {
       const m = /[\\/]\.dsh[\\/]profiles[\\/]([^\\/]+)[\\/]cordis\.patch\.yml$/i.exec(filePath);
-      if (m && PROFILE_NAME_RE.test(m[1])) return m[1];
+      if (m && PROFILE_NAME_RE.test(m[1]) && !seen.has(m[1])) {
+        seen.add(m[1]);
+        found.push(m[1]);
+      }
     }
   } catch {}
-  return null;
+  return found;
+}
+
+function readRecordedProfile(home) {
+  const list = listRecordedProfiles(home);
+  return list.length > 0 ? list[0] : null;
 }
 
 export function resolveProfileName(home, explicitProfile) {
@@ -73,9 +83,16 @@ function assertYamlArrayOrEmpty(text) {
 export function specs(home, src, runtime, options = {}) {
   const start = "# >>> agy-dart >>>";
   const end = "# <<< agy-dart <<<";
-  const profile = resolveProfileName(home, options.profile);
+  const hasExplicitProfile =
+    options.profile !== undefined && options.profile !== null && String(options.profile).trim() !== "";
+  const recordedProfiles = hasExplicitProfile ? [] : listRecordedProfiles(home);
+  const profiles =
+    !hasExplicitProfile &&
+    (options.action === "uninstall" || options.action === "doctor" || options.action === "status") &&
+    recordedProfiles.length > 0
+      ? recordedProfiles
+      : [resolveProfileName(home, options.profile)];
   const explicitMcpOnly = typeof options.mcpOnly === "boolean" ? options.mcpOnly : undefined;
-  const patchFile = path.join(home, ".dsh", "profiles", profile, "cordis.patch.yml");
 
   function block(executable = process.execPath, mcpOnly = Boolean(explicitMcpOnly)) {
     const servers = serverCommands(runtime, executable);
@@ -151,9 +168,23 @@ export function specs(home, src, runtime, options = {}) {
     const tail = raw.slice(range.after);
     let prefix = raw.slice(0, range.offset);
     if (undo.replacedEmptyArray) {
-      const restored = prefix + (undo.replaced ?? "[]") + (tail ? tail : undo.hadTrailingNewline ? newline : "");
-      checkUnmanaged(restored);
-      return restored;
+      const rest = prefix + tail;
+      checkUnmanaged(rest);
+      if (rest.length === 0 || COMMENT_OR_BLANK_ONLY_RE.test(rest)) {
+        const replaced = undo.replaced ?? "[]";
+        let restored = prefix + replaced;
+        if (tail) {
+          if (!restored.endsWith("\n") && !tail.startsWith("\r") && !tail.startsWith("\n")) {
+            restored += newline;
+          }
+          restored += tail;
+        } else if (undo.hadTrailingNewline && !restored.endsWith("\n")) {
+          restored += newline;
+        }
+        checkUnmanaged(restored);
+        return restored;
+      }
+      return rest;
     }
     if (undo.addedNewline && !tail) prefix = prefix.replace(/\r?\n$/, "");
     let rest = prefix + tail;
@@ -165,8 +196,9 @@ export function specs(home, src, runtime, options = {}) {
     return rest;
   }
 
-  return [
-    {
+  function buildProfileSpec(profile) {
+    const patchFile = path.join(home, ".dsh", "profiles", profile, "cordis.patch.yml");
+    return {
       file: patchFile,
       install(original) {
         const raw = original ?? "";
@@ -202,12 +234,15 @@ export function specs(home, src, runtime, options = {}) {
         });
       },
       verify(raw) {
+        assertYamlArrayOrEmpty(raw);
         if (!ownedRange(raw, process.execPath, explicitMcpOnly)) return false;
-        remove(raw, { executable: process.execPath, mcpOnly: explicitMcpOnly });
+        const afterRemove = remove(raw, { executable: process.execPath, mcpOnly: explicitMcpOnly });
+        assertYamlArrayOrEmpty(afterRemove);
         return true;
       },
       remove
-    },
-    ...skillSpecs(home, ".dsh", src)
-  ];
+    };
+  }
+
+  return [...profiles.map(buildProfileSpec), ...skillSpecs(home, ".dsh", src)];
 }

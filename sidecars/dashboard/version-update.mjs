@@ -10,6 +10,8 @@ export const UPDATE_MARKER_NAME = ".update-in-progress";
 
 const PLUGIN_NAME = "agy-dart";
 const SYNC_MARKER_NAME = ".agy-dart-sync.json";
+const PACKAGE_MANIFEST_PATH = "scripts/package-manifest.json";
+const SUPPORTED_PACKAGE_MANIFEST_SCHEMA = 1;
 const SIDECAR_REL_DIR = "sidecars/dashboard";
 const SIDECAR_MANIFEST = `${SIDECAR_REL_DIR}/sidecar.json`;
 const STALE_MARKER_MS = 10 * 60_000;
@@ -31,6 +33,15 @@ const DEVTOOLS_SENTINELS = [
   "scripts/cache-audit.mjs",
   "scripts/prefix-budget.mjs"
 ];
+const FALLBACK_DEVTOOLS_FILES = new Set([
+  "bin/agy-dart.mjs",
+  "fast/benchmark.mjs",
+  "context/lib/cache-simulator.js",
+  "scripts/cache-audit.mjs",
+  "scripts/prefix-budget.mjs",
+  "scripts/verify-package-graph.mjs",
+  "scripts/gen-review-brief.mjs"
+]);
 const FALLBACK_RUNTIME_ROOT_FILES = new Set([
   "plugin.json",
   "mcp_config.json",
@@ -307,30 +318,224 @@ function stripArrayLiteralComments(body) {
   return out;
 }
 
-function extractFrozenStringList(scriptSource, constName) {
-  const re = new RegExp(`\\b${constName}\\s*=\\s*Object\\.freeze\\(\\s*\\[([\\s\\S]*?)\\]\\s*\\)`);
-  const match = re.exec(scriptSource);
-  if (!match) return null;
-  const cleaned = stripArrayLiteralComments(match[1]);
-  const list = [];
-  const strRegex = /["']([^"'\r\n]+)["']/g;
-  for (const [, raw] of cleaned.matchAll(strRegex)) {
-    if (raw) list.push(raw);
+function createManifestIncompleteError(code, relPath = PACKAGE_MANIFEST_PATH, extra = {}) {
+  const err = new UpdateError("incomplete");
+  err.diagnostics = { code, ...(relPath ? { path: relPath } : {}), ...extra };
+  return err;
+}
+
+function normalizeSafeManifestPath(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().replace(/\\/g, "/");
+  if (!trimmed) return null;
+  const normalized = posix.normalize(trimmed);
+  if (!normalized || normalized === "." || normalized.startsWith("..") || normalized.startsWith("/")) {
+    return null;
   }
-  return list.length > 0 ? list : null;
+  return normalized;
+}
+
+function validateManifestPathArray(rawList, { required = false, field = "runtimeFiles" } = {}) {
+  if (!Array.isArray(rawList)) {
+    throw createManifestIncompleteError("MANIFEST_INVALID", PACKAGE_MANIFEST_PATH, { field });
+  }
+  if (required && rawList.length === 0) {
+    throw createManifestIncompleteError("MANIFEST_EMPTY", PACKAGE_MANIFEST_PATH, { field });
+  }
+  const seen = new Set();
+  const out = [];
+  for (const item of rawList) {
+    const normalized = normalizeSafeManifestPath(item);
+    if (!normalized || seen.has(normalized)) {
+      throw createManifestIncompleteError("MANIFEST_INVALID_PATH", PACKAGE_MANIFEST_PATH, { field });
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function validateToolNameArray(rawList) {
+  if (!Array.isArray(rawList) || rawList.length === 0) return null;
+  const out = [];
+  for (const item of rawList) {
+    if (typeof item !== "string" || !/^[A-Za-z0-9_.-]{1,64}$/.test(item)) return null;
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Parse and strictly validate the declarative `scripts/package-manifest.json` bundled in a release archive.
+ * Returns `null` only when the archive predates `scripts/package-manifest.json`; throws a diagnostic
+ * `UpdateError("incomplete")` when the manifest is present but malformed, unsupported, or incomplete.
+ */
+export function readPackageManifestFromArchive(archiveFiles) {
+  if (!archiveFiles.has(PACKAGE_MANIFEST_PATH)) return null;
+  const rawBytes = archiveFiles.get(PACKAGE_MANIFEST_PATH);
+  if (!rawBytes?.length) {
+    throw createManifestIncompleteError("MANIFEST_EMPTY");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBytes.toString("utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    throw createManifestIncompleteError("MANIFEST_INVALID_JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw createManifestIncompleteError("MANIFEST_INVALID");
+  }
+  if (parsed.schemaVersion !== SUPPORTED_PACKAGE_MANIFEST_SCHEMA) {
+    throw createManifestIncompleteError("MANIFEST_SCHEMA_UNSUPPORTED", PACKAGE_MANIFEST_PATH, {
+      schemaVersion: parsed.schemaVersion ?? null
+    });
+  }
+  const runtimeFiles = validateManifestPathArray(parsed.runtimeFiles, { required: true, field: "runtimeFiles" });
+  const devtoolsFiles =
+    parsed.devtoolsFiles === undefined
+      ? []
+      : validateManifestPathArray(parsed.devtoolsFiles, { required: false, field: "devtoolsFiles" });
+  const runtimeSet = new Set(runtimeFiles);
+  if (devtoolsFiles.some((rel) => runtimeSet.has(rel))) {
+    throw createManifestIncompleteError("MANIFEST_OVERLAP");
+  }
+  for (const rel of runtimeFiles) {
+    if (!archiveFiles.get(rel)?.length) {
+      throw createManifestIncompleteError("MANIFEST_MISSING_FILE", rel);
+    }
+  }
+  return {
+    schemaVersion: parsed.schemaVersion,
+    runtimeFiles,
+    devtoolsFiles: devtoolsFiles.filter((rel) => Boolean(archiveFiles.get(rel)?.length)),
+    fastMcpTools: validateToolNameArray(parsed.fastMcpTools),
+    contextMcpTools: validateToolNameArray(parsed.contextMcpTools)
+  };
+}
+
+function findFrozenArrayLiteralBody(scriptSource, constName) {
+  const headerRe = new RegExp(`\\b${constName}\\s*=\\s*Object\\.freeze\\(\\s*\\[`);
+  const match = headerRe.exec(scriptSource);
+  if (!match) return { found: false, body: "" };
+  const start = match.index + match[0].length;
+  let inQuote = "";
+  let depth = 1;
+  for (let i = start; i < scriptSource.length; i++) {
+    const ch = scriptSource[i];
+    if (inQuote) {
+      if (ch === "\\" && i + 1 < scriptSource.length) {
+        i++;
+      } else if (ch === inQuote) {
+        inQuote = "";
+      }
+      continue;
+    }
+    if (ch === "/" && scriptSource[i + 1] === "/") {
+      i += 2;
+      while (i < scriptSource.length && scriptSource[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && scriptSource[i + 1] === "*") {
+      i += 2;
+      while (i < scriptSource.length && !(scriptSource[i] === "*" && scriptSource[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      depth += 1;
+    } else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        const tail = scriptSource.slice(i + 1).trimStart();
+        if (!tail.startsWith(")")) return { found: true, invalid: true, body: "" };
+        return { found: true, invalid: false, body: scriptSource.slice(start, i) };
+      }
+    }
+  }
+  return { found: true, invalid: true, body: "" };
+}
+
+function parseStrictStringLiteralArrayBody(cleanedBody) {
+  const list = [];
+  let i = 0;
+  const n = cleanedBody.length;
+  let expectValue = true;
+  while (i < n) {
+    while (i < n && /\s/.test(cleanedBody[i])) i++;
+    if (i >= n) break;
+    const ch = cleanedBody[i];
+    if (expectValue) {
+      if (ch !== '"' && ch !== "'") return null;
+      const quote = ch;
+      i++;
+      let val = "";
+      let closed = false;
+      while (i < n) {
+        const c = cleanedBody[i];
+        if (c === "\r" || c === "\n") return null;
+        if (c === "\\") {
+          if (i + 1 >= n) return null;
+          const esc = cleanedBody[++i];
+          if (esc === "n") val += "\n";
+          else if (esc === "r") val += "\r";
+          else if (esc === "t") val += "\t";
+          else val += esc;
+          i++;
+          continue;
+        }
+        if (c === quote) {
+          closed = true;
+          i++;
+          break;
+        }
+        val += c;
+        i++;
+      }
+      if (!closed || !val) return null;
+      list.push(val);
+      expectValue = false;
+    } else {
+      if (ch !== ",") return null;
+      i++;
+      expectValue = true;
+    }
+  }
+  return list;
+}
+
+export function extractFrozenStringListStrict(scriptSource, constName) {
+  const located = findFrozenArrayLiteralBody(scriptSource, constName);
+  if (!located.found) return { status: "missing", values: null };
+  if (located.invalid) return { status: "invalid", values: null };
+  const cleaned = stripArrayLiteralComments(located.body);
+  const parsed = parseStrictStringLiteralArrayBody(cleaned);
+  if (parsed === null) return { status: "invalid", values: null };
+  return { status: "ok", values: parsed };
+}
+
+function extractFrozenStringList(scriptSource, constName) {
+  const res = extractFrozenStringListStrict(scriptSource, constName);
+  return res.status === "ok" && res.values.length > 0 ? res.values : null;
 }
 
 function extractRuntimeFilesFromInstallScript(scriptSource, archiveFiles) {
-  const rawList = extractFrozenStringList(scriptSource, "RUNTIME_FILES");
-  if (!rawList) return null;
+  const res = extractFrozenStringListStrict(scriptSource, "RUNTIME_FILES");
+  if (res.status === "missing") return null;
+  if (res.status === "invalid" || !res.values || res.values.length === 0) {
+    throw createManifestIncompleteError("LEGACY_MANIFEST_UNPARSEABLE", "scripts/install.mjs");
+  }
   const list = [];
-  for (const raw of rawList) {
-    const normalized = posix.normalize(raw.replace(/\\/g, "/"));
-    if (!normalized || normalized.startsWith("..") || normalized.startsWith("/")) {
-      throw new UpdateError("incomplete");
+  for (const raw of res.values) {
+    const normalized = normalizeSafeManifestPath(raw);
+    if (!normalized) {
+      throw createManifestIncompleteError("LEGACY_MANIFEST_INVALID_PATH", "scripts/install.mjs");
     }
     if (!archiveFiles.get(normalized)?.length) {
-      throw new UpdateError("incomplete");
+      throw createManifestIncompleteError("LEGACY_MANIFEST_MISSING_FILE", normalized);
     }
     list.push(normalized);
   }
@@ -338,12 +543,12 @@ function extractRuntimeFilesFromInstallScript(scriptSource, archiveFiles) {
 }
 
 function extractDevtoolsFilesFromInstallScript(scriptSource, archiveFiles) {
-  const rawList = extractFrozenStringList(scriptSource, "DEVTOOLS_FILES");
-  if (!rawList) return [];
+  const res = extractFrozenStringListStrict(scriptSource, "DEVTOOLS_FILES");
+  if (res.status !== "ok" || !res.values) return [];
   const list = [];
-  for (const raw of rawList) {
-    const normalized = posix.normalize(raw.replace(/\\/g, "/"));
-    if (!normalized || normalized.startsWith("..") || normalized.startsWith("/")) continue;
+  for (const raw of res.values) {
+    const normalized = normalizeSafeManifestPath(raw);
+    if (!normalized) continue;
     if (archiveFiles.get(normalized)?.length) {
       list.push(normalized);
     }
@@ -355,6 +560,7 @@ export function selectFallbackRuntimeFiles(archiveFiles) {
   const selected = [];
   for (const [relPath, bytes] of archiveFiles) {
     if (!bytes?.length) continue;
+    if (FALLBACK_DEVTOOLS_FILES.has(relPath)) continue;
     const top = relPath.split("/")[0];
     if (FALLBACK_RUNTIME_ROOT_FILES.has(relPath) || FALLBACK_RUNTIME_DIRS.has(top)) {
       selected.push(relPath);
@@ -421,18 +627,22 @@ function preserveWindowsSidecarCommand(sidecarBuf, installedSidecar) {
 
 function applyPreservedConfigurations(
   selectedFiles,
-  { installedMcp, installedHooks, installedSidecar, installedUserConfig, installScriptSource }
+  { installedMcp, installedHooks, installedSidecar, installedUserConfig, installScriptSource, packageManifest }
 ) {
   // 1. Preserve tool-loading mode on mcp_config.json
   try {
     const mcpObj = JSON.parse(selectedFiles.get("mcp_config.json").toString("utf8"));
     const mode = detectInstalledToolLoading(installedMcp, installedUserConfig);
-    const fastNames = extractToolListFromInstallScript(installScriptSource, "FAST_MCP_TOOL_NAMES", DEFAULT_FAST_TOOLS);
-    const ctxNames = extractToolListFromInstallScript(
-      installScriptSource,
-      "CONTEXT_MCP_TOOL_NAMES",
-      DEFAULT_CONTEXT_TOOLS
-    );
+    const fastNames =
+      packageManifest?.fastMcpTools ||
+      extractToolListFromInstallScript(installScriptSource, "FAST_MCP_TOOL_NAMES", DEFAULT_FAST_TOOLS);
+    const ctxNames =
+      packageManifest?.contextMcpTools ||
+      extractToolListFromInstallScript(
+        installScriptSource,
+        "CONTEXT_MCP_TOOL_NAMES",
+        DEFAULT_CONTEXT_TOOLS
+      );
     if (mcpObj?.mcpServers?.fast) {
       if (mode === "lazy") delete mcpObj.mcpServers.fast.tools;
       else mcpObj.mcpServers.fast.tools = buildEagerMap(fastNames);
@@ -521,8 +731,11 @@ function prepareReleaseFiles(archiveFiles, expectedVersion, context) {
   }
 
   const installScriptSource = archiveFiles.get("scripts/install.mjs").toString("utf8");
+  const packageManifest = readPackageManifestFromArchive(archiveFiles);
   const runtimeList =
-    extractRuntimeFilesFromInstallScript(installScriptSource, archiveFiles) || selectFallbackRuntimeFiles(archiveFiles);
+    packageManifest?.runtimeFiles ||
+    extractRuntimeFilesFromInstallScript(installScriptSource, archiveFiles) ||
+    selectFallbackRuntimeFiles(archiveFiles);
 
   const selectedFiles = new Map();
   for (const rel of runtimeList) {
@@ -532,7 +745,10 @@ function prepareReleaseFiles(archiveFiles, expectedVersion, context) {
   }
   // Preserve devtools files when the installed plugin already has --with-devtools present.
   if (context?.preserveDevtools) {
-    for (const rel of extractDevtoolsFilesFromInstallScript(installScriptSource, archiveFiles)) {
+    const devtoolsList = packageManifest
+      ? packageManifest.devtoolsFiles
+      : extractDevtoolsFilesFromInstallScript(installScriptSource, archiveFiles);
+    for (const rel of devtoolsList) {
       if (!selectedFiles.has(rel)) {
         selectedFiles.set(rel, archiveFiles.get(rel));
       }
@@ -557,7 +773,7 @@ function prepareReleaseFiles(archiveFiles, expectedVersion, context) {
     }
   }
 
-  applyPreservedConfigurations(selectedFiles, { ...context, installScriptSource });
+  applyPreservedConfigurations(selectedFiles, { ...context, installScriptSource, packageManifest });
   return selectedFiles;
 }
 
@@ -716,10 +932,35 @@ async function readOptionalJson(filePath) {
   }
 }
 
+async function removeEmptyAncestors(targetRoot, relPaths) {
+  const dirs = new Set();
+  for (const rel of relPaths) {
+    let cur = dirname(join(targetRoot, rel));
+    while (!isSamePath(cur, targetRoot)) {
+      dirs.add(cur);
+      const parent = dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  }
+  for (const dirPath of [...dirs].sort((a, b) => b.length - a.length)) {
+    const after = await readdir(dirPath).catch(() => ["non-empty"]);
+    if (after.length === 0) {
+      await unlink(dirPath).catch(async () => {
+        await rm(dirPath, { recursive: false, force: true }).catch(() => {});
+      });
+    }
+  }
+}
+
 async function syncOwnedSecondaryHosts(
   primaryRoot,
   selectedFiles,
-  { syncedHostsDir = "", caseInsensitiveFs = process.platform === "win32" || process.platform === "darwin" } = {}
+  {
+    syncedHostsDir = "",
+    move = rename,
+    caseInsensitiveFs = process.platform === "win32" || process.platform === "darwin"
+  } = {}
 ) {
   const receiptDir = syncedHostsDir || join(await realpath(homedir()).catch(() => resolve(homedir())), ".agy-dart", "synced-hosts");
   let entries;
@@ -748,6 +989,8 @@ async function syncOwnedSecondaryHosts(
     if (seenTargets.has(targetKey)) continue;
     seenTargets.add(targetKey);
 
+    let secWorkDir = null;
+    let keepSecBackup = false;
     try {
       const targetSt = await safeLstat(targetRaw);
       if (!targetSt?.isDirectory() || targetSt.isSymbolicLink()) continue;
@@ -780,38 +1023,125 @@ async function syncOwnedSecondaryHosts(
         }
       }
 
-      for (const [rel, rawBytes] of selectedFiles) {
-        const bytes = rel === SIDECAR_MANIFEST ? preserveWindowsSidecarCommand(rawBytes, targetSidecar) : rawBytes;
-        const dst = join(target, rel);
-        await mkdir(dirname(dst), { recursive: true });
-        await writeFile(dst, bytes);
-      }
-
+      // Only prune obsolete files explicitly registered in the previous sync receipt so user-owned files stay intact.
+      const obsoleteFiles = [];
+      const seenObsolete = new Set();
       for (const prevRel of marker.files) {
         if (typeof prevRel !== "string" || !prevRel) continue;
         const normalizedPrev = posix.normalize(prevRel.replace(/\\/g, "/"));
-        if (normalizedPrev.startsWith("..") || normalizedPrev.startsWith("/") || isPreservedLocalFile(normalizedPrev)) {
+        if (
+          !normalizedPrev ||
+          normalizedPrev === "." ||
+          normalizedPrev.startsWith("..") ||
+          normalizedPrev.startsWith("/") ||
+          isPreservedLocalFile(normalizedPrev)
+        ) {
           continue;
         }
-        if (selectedKeySet.has(normKey(normalizedPrev))) continue;
-        const obsoletePath = join(target, normalizedPrev);
-        const obsSt = await safeLstat(obsoletePath);
-        if (obsSt && !obsSt.isDirectory()) {
-          await unlink(obsoletePath).catch(() => {});
+        const prevKey = normKey(normalizedPrev);
+        if (selectedKeySet.has(prevKey) || seenObsolete.has(prevKey)) continue;
+        seenObsolete.add(prevKey);
+        await assertNoIntermediateSymlink(target, normalizedPrev);
+        const obsSt = await safeLstat(join(target, normalizedPrev));
+        if (obsSt && !obsSt.isDirectory() && !obsSt.isSymbolicLink()) {
+          obsoleteFiles.push(normalizedPrev);
         }
       }
 
-      await removeEmptyDirsRecursive(target, target).catch(() => {});
-      await writeFile(
-        join(target, SYNC_MARKER_NAME),
+      secWorkDir = await mkdtemp(join(dirname(target), ".agy-dart-sec-sync-"));
+      const secStageDir = join(secWorkDir, "next");
+      const secBackupDir = join(secWorkDir, "backup");
+      await mkdir(secBackupDir, { recursive: true });
+
+      for (const [rel, rawBytes] of selectedFiles) {
+        const bytes = rel === SIDECAR_MANIFEST ? preserveWindowsSidecarCommand(rawBytes, targetSidecar) : rawBytes;
+        const stagedDst = join(secStageDir, rel);
+        await mkdir(dirname(stagedDst), { recursive: true });
+        await writeFile(stagedDst, bytes, { flag: "wx" });
+      }
+      const nextMarkerBytes = Buffer.from(
         JSON.stringify({ ...marker, files: Array.from(selectedFiles.keys()) }) + "\n",
         "utf8"
       );
+      await writeFile(join(secStageDir, SYNC_MARKER_NAME), nextMarkerBytes, { flag: "wx" });
+
+      const changes = [];
+      const moveTracked = async (from, to) => {
+        await mkdir(dirname(to), { recursive: true });
+        await move(from, to);
+        changes.push({ from, to });
+      };
+
+      const tail = new Set([`${SIDECAR_REL_DIR}/server.mjs`, "plugin.json"]);
+      const orderedInstall = [
+        ...Array.from(selectedFiles.keys()).filter((rel) => !tail.has(rel)),
+        ...Array.from(selectedFiles.keys()).filter((rel) => tail.has(rel))
+      ];
+
+      try {
+        for (const rel of orderedInstall) {
+          const incoming = join(secStageDir, rel);
+          const live = join(target, rel);
+          const existing = await safeLstat(live);
+          if (existing) {
+            if (existing.isDirectory() || existing.isSymbolicLink()) throw new UpdateError("pathConflict");
+            await moveTracked(live, join(secBackupDir, "prev", rel));
+          }
+          await moveTracked(incoming, live);
+        }
+
+        for (const rel of obsoleteFiles) {
+          const live = join(target, rel);
+          const existing = await safeLstat(live);
+          if (existing && !existing.isDirectory() && !existing.isSymbolicLink()) {
+            await moveTracked(live, join(secBackupDir, "obsolete", rel));
+          }
+        }
+
+        const liveMarker = join(target, SYNC_MARKER_NAME);
+        const existingMarker = await safeLstat(liveMarker);
+        if (existingMarker && !existingMarker.isDirectory() && !existingMarker.isSymbolicLink()) {
+          await moveTracked(liveMarker, join(secBackupDir, "prev", SYNC_MARKER_NAME));
+        }
+        await moveTracked(join(secStageDir, SYNC_MARKER_NAME), liveMarker);
+      } catch (replaceErr) {
+        const hadChanges = changes.length > 0;
+        let rolledBack = true;
+        try {
+          for (const { from, to } of [...changes].reverse()) {
+            await mkdir(dirname(from), { recursive: true });
+            await move(to, from);
+          }
+        } catch {
+          rolledBack = false;
+          keepSecBackup = true;
+        }
+        const code = typeof replaceErr?.code === "string" ? replaceErr.code : undefined;
+        const reason = !rolledBack
+          ? "recovery"
+          : replaceErr instanceof UpdateError
+            ? replaceErr.reason
+            : FILE_ERROR_REASONS[code] || "install";
+        warnings.push({
+          step: "sync-secondary-host",
+          reason,
+          ...(hadChanges ? { restored: rolledBack } : {})
+        });
+        continue;
+      }
+
+      if (obsoleteFiles.length > 0) {
+        await removeEmptyAncestors(target, obsoleteFiles).catch(() => {});
+      }
       syncedCount += 1;
     } catch (err) {
       const code = typeof err?.code === "string" ? err.code : undefined;
       const reason = err instanceof UpdateError ? err.reason : FILE_ERROR_REASONS[code] || "install";
       warnings.push({ step: "sync-secondary-host", reason });
+    } finally {
+      if (secWorkDir && !keepSecBackup) {
+        await rm(secWorkDir, { recursive: true, force: true, maxRetries: 2 }).catch(() => {});
+      }
     }
   }
 
@@ -885,7 +1215,7 @@ export function createPluginUpdater({
     diagnostics: { step, ...details }
   });
 
-  return async function update(expectedVersion) {
+  return async function update(expectedVersion, options = {}) {
     if (busy) return failure("busy", "start");
     busy = true;
     let workDir;
@@ -897,6 +1227,26 @@ export function createPluginUpdater({
       const parsedExpected = parseVersion(expectedVersion);
       if (!parsedExpected) throw new UpdateError("releaseChanged");
       const targetVersion = parsedExpected.version;
+      const automatic = Boolean(options?.automatic);
+      const expectedAsset =
+        options?.expectedAsset && typeof options.expectedAsset === "object" ? options.expectedAsset : null;
+      const requireVerifiedAsset = automatic || Boolean(options?.requireVerifiedAsset || expectedAsset);
+      const pinnedAssetUrl =
+        typeof expectedAsset?.assetUrl === "string" ? expectedAsset.assetUrl.trim() : "";
+      const pinnedAssetSha256 =
+        typeof expectedAsset?.assetSha256 === "string" ? expectedAsset.assetSha256.trim().toLowerCase() : "";
+      const pinnedAssetName =
+        typeof expectedAsset?.assetName === "string" ? expectedAsset.assetName.trim() : "";
+      const pinnedReleaseTag =
+        typeof expectedAsset?.releaseTag === "string" ? expectedAsset.releaseTag.trim() : "";
+
+      if (
+        requireVerifiedAsset &&
+        expectedAsset &&
+        (!pinnedAssetUrl || !/^[0-9a-f]{64}$/.test(pinnedAssetSha256))
+      ) {
+        throw new UpdateError("noVerifiedAsset");
+      }
 
       step = "inspect";
       const root = await resolveInstalledRoot(sidecarDirectory, { pluginsDirectory, allowCustomRoot });
@@ -935,18 +1285,31 @@ export function createPluginUpdater({
       }
 
       step = "download";
-      const useVerifiedAsset = Boolean(
-        typeof release.assetUrl === "string" &&
-          release.assetUrl &&
-          typeof release.assetSha256 === "string" &&
-          release.assetSha256
-      );
+      const freshAssetUrl = typeof release.assetUrl === "string" ? release.assetUrl.trim() : "";
+      const freshAssetSha256 = typeof release.assetSha256 === "string" ? release.assetSha256.trim().toLowerCase() : "";
+      const freshAssetName = typeof release.assetName === "string" ? release.assetName.trim() : "";
+      const freshReleaseTag = typeof release.releaseTag === "string" ? release.releaseTag.trim() : "";
+      const useVerifiedAsset = Boolean(freshAssetUrl && /^[0-9a-f]{64}$/.test(freshAssetSha256));
+      if (requireVerifiedAsset && !useVerifiedAsset) {
+        throw new UpdateError("noVerifiedAsset");
+      }
+      if (expectedAsset) {
+        // Preserve exact URL path case sensitivity; only SHA-256 hex is normalized case-insensitively.
+        if (
+          freshAssetUrl !== pinnedAssetUrl ||
+          freshAssetSha256 !== pinnedAssetSha256 ||
+          (pinnedAssetName && freshAssetName && freshAssetName !== pinnedAssetName) ||
+          (pinnedReleaseTag && freshReleaseTag !== pinnedReleaseTag)
+        ) {
+          throw new UpdateError("releaseChanged");
+        }
+      }
       const downloadUrl = useVerifiedAsset
-        ? release.assetUrl
+        ? freshAssetUrl
         : `https://api.github.com/repos/${REPO}/tarball/${encodeURIComponent(release.releaseTag)}`;
       const archiveBuffer = await downloadArchive(downloadUrl, {
         ...downloadOptions,
-        ...(useVerifiedAsset ? { expectedSha256: release.assetSha256 } : {})
+        ...(useVerifiedAsset ? { expectedSha256: freshAssetSha256 } : {})
       });
 
       step = "validate-archive";
@@ -983,6 +1346,7 @@ export function createPluginUpdater({
       step = "sync-secondary";
       const syncSummary = await syncOwnedSecondaryHosts(root, selectedFiles, {
         syncedHostsDir,
+        move,
         caseInsensitiveFs
       });
 
@@ -993,7 +1357,7 @@ export function createPluginUpdater({
         version: releaseParsed.version,
         releaseTag: release.releaseTag,
         releaseUrl: release.releaseUrl,
-        ...(useVerifiedAsset ? { verifiedSha256: release.assetSha256 } : {}),
+        ...(useVerifiedAsset ? { verifiedSha256: freshAssetSha256 } : {}),
         ...(syncSummary.syncedCount > 0 ? { syncedSecondaryHosts: syncSummary.syncedCount } : {}),
         ...(syncSummary.warnings.length > 0 ? { warnings: syncSummary.warnings } : {})
       };

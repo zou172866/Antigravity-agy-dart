@@ -158,12 +158,25 @@ function truncateUtf8(text, maxBytes) {
 }
 
 /**
- * Guarantee that JSON.stringify(obj, null, 2) stays strictly <= maxJsonBytes UTF-8 bytes
- * even after JSON escaping (e.g. thousands of \n -> \\n or quotes) expands string fields.
+ * Guarantee that BOTH `JSON.stringify(obj, null, 2)` AND its double-encoded MCP JSON-RPC
+ * wire envelope (`{ jsonrpc:"2.0", id, result:{ content:[{ type:"text", text: JSON.stringify(obj) }], isError:false } }\n`)
+ * stay strictly <= maxJsonBytes UTF-8 bytes even after JSON-in-JSON escaping (quotes/newlines) expands string fields.
  */
 export function capSerializedJsonField(obj, fieldName, rawBody, suffix = "", maxJsonBytes = MAX_MCP_JSON_BYTES) {
   obj[fieldName] = `${rawBody}${suffix}`;
-  const measure = () => Buffer.byteLength(JSON.stringify(obj, null, 2), "utf8");
+  const measure = () => {
+    const prettyBytes = Buffer.byteLength(JSON.stringify(obj, null, 2), "utf8");
+    const wireEnvelope = JSON.stringify({
+      jsonrpc: "2.0",
+      id: "00000000-0000-0000-0000-000000000000",
+      result: {
+        content: [{ type: "text", text: JSON.stringify(obj) }],
+        isError: false
+      }
+    });
+    const wireBytes = Buffer.byteLength(wireEnvelope, "utf8") + 1; // +1 for trailing \n
+    return Math.max(prettyBytes, wireBytes);
+  };
   if (measure() <= maxJsonBytes) {
     return { truncatedForJson: false, keptBody: rawBody };
   }
@@ -184,6 +197,183 @@ export function capSerializedJsonField(obj, fieldName, rawBody, suffix = "", max
   }
   obj[fieldName] = `${best}${suffix}`;
   return { truncatedForJson: true, keptBody: best };
+}
+
+const MAX_TOOL_CALL_WIRE_BYTES = 8800;
+
+function truncateUtf8ForWire(text, maxBytes) {
+  if (maxBytes <= 0 || !text) return "";
+  const buf = Buffer.from(String(text), "utf8");
+  if (buf.length <= maxBytes) return String(text);
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;
+  if (end > 0) {
+    let start = end - 1;
+    while (start > 0 && (buf[start] & 0xc0) === 0x80) start -= 1;
+    const lead = buf[start];
+    let seqLen = 1;
+    if ((lead & 0xe0) === 0xc0) seqLen = 2;
+    else if ((lead & 0xf0) === 0xe0) seqLen = 3;
+    else if ((lead & 0xf8) === 0xf0) seqLen = 4;
+    if (end - start < seqLen) end = start;
+  }
+  return buf.subarray(0, end).toString("utf8");
+}
+
+function binarySearchWireUtf8(rawText, suffix, fitsFn) {
+  const totalBytes = Buffer.byteLength(rawText, "utf8");
+  let lo = 0;
+  let hi = totalBytes;
+  let best = "";
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const candidate = truncateUtf8ForWire(rawText, mid);
+    if (fitsFn(`${candidate}${suffix}`)) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (fitsFn(`${best}${suffix}`)) return `${best}${suffix}`;
+  let sLo = 0;
+  let sHi = Buffer.byteLength(suffix, "utf8");
+  let sBest = "";
+  while (sLo <= sHi) {
+    const mid = (sLo + sHi) >> 1;
+    const cand = truncateUtf8ForWire(suffix, mid);
+    if (fitsFn(cand)) {
+      sBest = cand;
+      sLo = mid + 1;
+    } else {
+      sHi = mid - 1;
+    }
+  }
+  return sBest;
+}
+
+/**
+ * Enforce an absolute UTF-8 byte ceiling (default 8,800 B) on the complete outbound
+ * JSON-RPC line (`JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n"`), covering
+ * double-escaped `content[0].text`, `structuredContent` dual payloads, and `isError` replies.
+ */
+export function enforceToolCallWireBudget(id, response, maxWireBytes = MAX_TOOL_CALL_WIRE_BYTES) {
+  const measureLine = (resObj) =>
+    Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id, result: resObj }) + "\n", "utf8");
+
+  if (!response || typeof response !== "object" || measureLine(response) <= maxWireBytes) {
+    return response;
+  }
+
+  const next = {
+    ...response,
+    ...(Array.isArray(response.content)
+      ? { content: response.content.map((item) => (item && typeof item === "object" ? { ...item } : item)) }
+      : {})
+  };
+
+  if (next.structuredContent !== undefined && measureLine(next) > maxWireBytes) {
+    if (next.structuredContent && typeof next.structuredContent === "object") {
+      next.structuredContent = { kind: next.structuredContent.kind || "diagnostics", wireTruncated: true };
+      if (measureLine(next) > maxWireBytes) {
+        delete next.structuredContent;
+      }
+    } else {
+      delete next.structuredContent;
+    }
+  }
+
+  if (measureLine(next) <= maxWireBytes) {
+    return next;
+  }
+
+  const firstTextItem = Array.isArray(next.content)
+    ? next.content.find((item) => item && item.type === "text" && typeof item.text === "string")
+    : null;
+
+  if (firstTextItem) {
+    let parsed = null;
+    try {
+      const maybe = JSON.parse(firstTextItem.text);
+      if (maybe && typeof maybe === "object" && !Array.isArray(maybe)) {
+        parsed = maybe;
+      }
+    } catch {}
+
+    if (parsed) {
+      const setJsonText = (obj) => {
+        firstTextItem.text = JSON.stringify(obj);
+        return measureLine(next) <= maxWireBytes;
+      };
+      const truncSuffix = parsed.sourceId
+        ? `\n... [wire-capped <=8.8 KB; use ctx_search(sourceId: "${parsed.sourceId}")]`
+        : "\n... [wire-capped <=8.8 KB]";
+
+      const preferredFields = ["output", "content", "summary", "brief", "snippet", "text", "error"];
+      const stringKeys = Object.keys(parsed)
+        .filter((k) => typeof parsed[k] === "string" && parsed[k].length > 0)
+        .sort((a, b) => {
+          const ai = preferredFields.indexOf(a);
+          const bi = preferredFields.indexOf(b);
+          if (ai >= 0 || bi >= 0) return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+          return parsed[b].length - parsed[a].length;
+        });
+
+      for (const key of stringKeys) {
+        if (measureLine(next) <= maxWireBytes) break;
+        const origVal = parsed[key];
+        parsed[key] = binarySearchWireUtf8(origVal, truncSuffix, (cand) => {
+          parsed[key] = cand;
+          if (Object.prototype.hasOwnProperty.call(parsed, "returnedBytes")) {
+            parsed.returnedBytes = Buffer.byteLength(cand, "utf8");
+          }
+          parsed.wireTruncated = true;
+          return setJsonText(parsed);
+        });
+        if (Object.prototype.hasOwnProperty.call(parsed, "returnedBytes")) {
+          parsed.returnedBytes = Buffer.byteLength(parsed[key], "utf8");
+        }
+        parsed.wireTruncated = true;
+        setJsonText(parsed);
+      }
+
+      const arrayKeys = Object.keys(parsed)
+        .filter((k) => Array.isArray(parsed[k]) && parsed[k].length > 0)
+        .sort((a, b) => JSON.stringify(parsed[b]).length - JSON.stringify(parsed[a]).length);
+      for (const arrKey of arrayKeys) {
+        if (measureLine(next) <= maxWireBytes) break;
+        const origArr = parsed[arrKey];
+        parsed.wireTruncated = true;
+        while (origArr.length > 0 && !setJsonText(parsed)) {
+          origArr.pop();
+        }
+      }
+
+      if (measureLine(next) > maxWireBytes) {
+        const minimal = {
+          ...(parsed.sourceId ? { sourceId: parsed.sourceId } : {}),
+          ...(parsed.ok !== undefined ? { ok: parsed.ok } : {}),
+          ...(parsed.exitCode !== undefined ? { exitCode: parsed.exitCode } : {}),
+          wireTruncated: true
+        };
+        if (!setJsonText(minimal)) {
+          firstTextItem.text = binarySearchWireUtf8(JSON.stringify(minimal), "", (cand) => {
+            firstTextItem.text = cand;
+            return measureLine(next) <= maxWireBytes;
+          });
+        }
+      }
+      return next;
+    }
+
+    const plainSuffix = "... [truncated to <=8.8 KB wire budget]";
+    firstTextItem.text = binarySearchWireUtf8(firstTextItem.text, plainSuffix, (cand) => {
+      firstTextItem.text = cand;
+      return measureLine(next) <= maxWireBytes;
+    });
+  }
+
+  return next;
 }
 
 /**
@@ -215,7 +405,8 @@ export async function fetchUrlText(urlStr, timeoutOrOptions = 15000) {
 
     const { parsed, pinned, pinnedRecords } = await validateFetchTarget(currentUrl, {
       ...(opts.allowPrivate !== undefined ? { allowPrivate: Boolean(opts.allowPrivate) } : {}),
-      lookupFn: opts.lookupFn
+      lookupFn: opts.lookupFn,
+      timeoutMs: remainingBeforeDns
     });
 
     const remainingMs = deadline - Date.now();

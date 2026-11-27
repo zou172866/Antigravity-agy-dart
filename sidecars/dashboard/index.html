@@ -217,7 +217,7 @@
       --hover-tint: #1e1e2e;
       --cue-tag-bg: rgba(249, 226, 175, 0.10);
       --input-bg: #0d0d15;
-      --placeholder-color: #6c7086;
+      --placeholder-color: #7f849c;
       --dot-muted: #6c7086;
       --safety-advice-warn-bg: #0d0d15;
       --safety-advice-critical-bg: #0d0d15;
@@ -3072,7 +3072,7 @@
           <button id="auto-update-install-btn" type="button" onclick="toggleAutoUpdateInstall()" class="toggle-chip" data-enabled="0" data-i18n-title="autoUpdateInstallTip" title="Off by default. When enabled, silently installs same-major GitHub Releases with verified SHA-256 packages (skips active keepalives and trips a per-version circuit breaker on failure).">Auto-Update: OFF</button>
         </div>
 
-        <span class="section-jump-strip" data-section-jump-strip data-density="medium" role="navigation" aria-label="Jump to section">
+        <span class="section-jump-strip" data-section-jump-strip data-density="medium" role="navigation" data-i18n-aria-label="sectionNavTip" aria-label="Jump to section">
           <span class="section-jump-thumb" data-section-jump-thumb aria-hidden="true"></span>
           <button type="button" class="section-jump-chip is-active" style="--nav-dot: var(--accent);" data-nav-target="kv-cache-card" data-nav-full-key="navCtxOverview" data-tooltip="Context Overview" aria-label="Context Overview" aria-current="true" onclick="jumpToSection('kv-cache-card', this)"><span class="section-nav-dot"></span><span class="section-jump-label" data-i18n="navCtxShort">Ctx</span></button>
           <button type="button" class="section-jump-chip" style="--nav-dot: var(--seg-tool-calls);" data-nav-target="safety-audit-card" data-nav-full-key="navSafetyMonitor" data-tooltip="Safety Monitor" aria-label="Safety Monitor" onclick="jumpToSection('safety-audit-card', this)"><span class="section-nav-dot"></span><span class="section-jump-label" data-i18n="navSafetyShort">Safe</span></button>
@@ -3340,7 +3340,7 @@
     </section>
 
     <!-- One-Time GitHub Star Milestone Banner (Hidden by default; shown at most once lifetime) -->
-    <section id="star-milestone-banner" class="star-banner hidden" role="region" aria-label="GitHub Star Milestone">
+    <section id="star-milestone-banner" class="star-banner hidden" role="region" data-i18n-aria-label="starBannerRegionLabel" aria-label="GitHub Star Milestone">
       <div id="star-banner-msg" class="star-banner-msg"></div>
       <div id="star-banner-actions" class="star-banner-actions">
         <a id="star-banner-open-btn" href="https://github.com/zou172866/Antigravity-agy-dart" target="_blank" rel="noopener noreferrer" onclick="handleStarBannerOpen()" class="btn btn-primary btn-sm" data-i18n="starBannerOpenBtn">★ Star on GitHub</a>
@@ -3351,7 +3351,7 @@
     </section>
 
     <!-- Band 1b: Safety Monitor Quota-Burn Audit (Quiet single line when OK/undetected; auto-expands on warn/critical) -->
-    <section id="safety-audit-card" class="band safety-strip" role="region" aria-label="Safety Monitor Audit">
+    <section id="safety-audit-card" class="band safety-strip" role="region" data-i18n-aria-label="safetyCardRegionLabel" aria-label="Safety Monitor Audit">
       <div class="safety-head-row">
         <div class="safety-head-left">
           <span class="band-title" data-i18n="safetyCardTitle">Safety Check</span>
@@ -3549,6 +3549,7 @@
                 <option value="65536">64 KB</option>
                 <option id="cutoff-none-opt" value="0" data-i18n="cutoffNone">none</option>
               </select>
+              <span id="cutoff-override-badge" class="meta-tag is-warn hidden"></span>
             </div>
             <button onclick="resetExemptions()" class="btn btn-ghost btn-sm" data-i18n="resetDefaultsBtn" data-i18n-title="resetDefaultsTip" title="Restore default file categories and clear custom extensions">Reset Defaults</button>
           </div>
@@ -3685,6 +3686,11 @@
         cutoffHostCap: '45 KB (host cap)',
         cutoffCustomFmt: '{size} (custom)',
         cutoffNone: 'none',
+        cutoffSourceEnv: 'env',
+        cutoffSourceConfig: 'config.json',
+        cutoffOverrideBadge: 'Override: {source}',
+        cutoffOverrideTip: 'Global cutoff is overridden by {source} ({effective}). Saved global value: {saved}. Switch to Session or Conversation scope to override locally.',
+        cutoffOverrideTipNoSaved: 'Active cutoff ({effective}) comes from {source}. Switch to Session or Conversation scope to override locally.',
         tierOff: 'off',
         versionTip: 'Current agy-dart Version',
         refreshTip: 'Refresh Telemetry',
@@ -4109,6 +4115,7 @@
         wdTimerFmt: '{silent} silent / {thresh} hang limit (warn {warn})',
         starHeaderLabel: 'Star',
         starHeaderTip: 'Star or Watch Releases on GitHub for Antigravity compatibility fixes',
+        starBannerRegionLabel: 'GitHub Star Milestone',
         starBannerMsgSavings: 'Saved {savedText} of context bloat so far. Antigravity updates fast — Star or Watch releases on GitHub so you never miss compatibility fixes.',
         starBannerMsgAudit: 'Your Prompt Cache audit passed. Antigravity updates fast — Star or Watch releases on GitHub so you never miss compatibility fixes.',
         starBannerOpenBtn: '★ Star on GitHub',
@@ -4165,6 +4172,7 @@
         versionErrInstall: 'Failed to replace installed plugin files.',
         versionErrRestoredSuffix: ' Previous files were restored.',
         safetyCardTitle: 'Safety Check',
+        safetyCardRegionLabel: 'Safety Monitor Audit',
         safetyChecking: 'Checking background safety logs...',
         safetyDetailsBtn: 'Details',
         safetyHideBtn: 'Hide',
@@ -4246,6 +4254,11 @@
         cutoffHostCap: '45 KB（宿主上限）',
         cutoffCustomFmt: '{size}（自定义）',
         cutoffNone: '不限制',
+        cutoffSourceEnv: '环境变量',
+        cutoffSourceConfig: 'config.json',
+        cutoffOverrideBadge: '已由 {source} 覆盖',
+        cutoffOverrideTip: '全局截断阈值正被 {source} 覆盖（当前生效 {effective}，已保存全局值 {saved}）。切到「本次会话」或「当前对话」可单独覆写。',
+        cutoffOverrideTipNoSaved: '当前截断阈值（{effective}）来自 {source}。切到「本次会话」或「当前对话」可单独覆写。',
         tierOff: '关闭',
         versionTip: '当前 agy-dart 版本',
         refreshTip: '刷新遥测数据',
@@ -4670,6 +4683,7 @@
         wdTimerFmt: '已等 {silent} / 超 {thresh} 判定卡死（{warn} 提醒）',
         starHeaderLabel: 'Star',
         starHeaderTip: '去 GitHub 点 Star / Watch Releases 跟进 Antigravity 兼容修复',
+        starBannerRegionLabel: 'GitHub Star 里程碑',
         starBannerMsgSavings: '已为你累计拦下 {savedText} 冗余上下文。Antigravity 更新频繁，去 GitHub 点个 Star / Watch 防下次失效找不到修复版。',
         starBannerMsgAudit: 'Prompt Cache 体检已通过。Antigravity 更新频繁，去 GitHub 点个 Star / Watch 防下次失效找不到修复版。',
         starBannerOpenBtn: '★ 去 GitHub 点 Star',
@@ -4726,6 +4740,7 @@
         versionErrInstall: '替换已安装插件文件时出错。',
         versionErrRestoredSuffix: ' 已自动回滚恢复原版本文件。',
         safetyCardTitle: '后台安检监测',
+        safetyCardRegionLabel: '后台安检监测',
         safetyChecking: '正在查看后台安检日志...',
         safetyDetailsBtn: '详情',
         safetyHideBtn: '收起',
@@ -4939,6 +4954,7 @@
     let lastObservedWatchdogIncidentKey = '';
     let refreshSeq = 0;
     let watchdogActionSeq = 0;
+    let searchRequestSeq = 0;
     let inFlightWatchdogActionCount = 0;
     let latestStartedWatchdogActionSeq = 0;
     let latestAppliedWatchdogActionSeq = 0;
@@ -5053,6 +5069,7 @@
         resetManualWarmState();
         resetHandoffDrawerTargetMode();
         ++watchdogActionSeq;
+        ++searchRequestSeq;
         clearHandoffSnapshot({ resetPreview: true, reloadIfOpen });
         resetPanelGuidanceState();
         updateWatchdogIncidentButtons();
@@ -5318,6 +5335,10 @@
       document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
         const key = el.getAttribute('data-i18n-placeholder');
         if (key) el.placeholder = t(key);
+      });
+      document.querySelectorAll('[data-i18n-aria-label]').forEach((el) => {
+        const key = el.getAttribute('data-i18n-aria-label');
+        if (key && typeof el.setAttribute === 'function') el.setAttribute('aria-label', t(key));
       });
     }
 
@@ -5753,6 +5774,7 @@
       applyScopeSelection(scope);
 
       ++watchdogActionSeq;
+      ++searchRequestSeq;
       lastObservedWatchdogIncidentKey = '';
       resetManualWarmState();
       resetHandoffDrawerTargetMode();
@@ -5900,6 +5922,54 @@
       if (cutoffSelect.dataset) cutoffSelect.dataset.lastConfirmedCutoff = cutoffSelect.value;
 
       renderGateReadCutoff(activeCutoff, s);
+      renderCutoffOverrideBadge(activeCutoff, s);
+    }
+
+    function renderCutoffOverrideBadge(activeCutoff, s) {
+      const badge = document.getElementById('cutoff-override-badge');
+      if (!badge) return;
+      const meta = s && typeof s === 'object' ? s : {};
+      const scopeSource =
+        currentScope === 'lifetime'
+          ? (meta.globalCutoffSource || meta.cutoffSource || '')
+          : currentScope === 'app'
+            ? (meta.appCutoffSource || meta.cutoffSource || '')
+            : (meta.conversationCutoffSource || meta.cutoffSource || '');
+      const overrideSource =
+        scopeSource === 'env' || scopeSource === 'config'
+          ? scopeSource
+          : currentScope === 'lifetime' && (meta.cutoffOverriddenBy === 'env' || meta.cutoffOverriddenBy === 'config')
+            ? meta.cutoffOverriddenBy
+            : null;
+      if (!overrideSource) {
+        badge.textContent = '';
+        badge.title = '';
+        if (badge.dataset) delete badge.dataset.overrideSource;
+        badge.classList?.add('hidden');
+        return;
+      }
+      const srcLabel = overrideSource === 'env' ? t('cutoffSourceEnv') : t('cutoffSourceConfig');
+      const fmtCutoff = (b) => (Number(b) === 0 ? t('cutoffNone') : formatBytes(Number(b)));
+      const effText = fmtCutoff(activeCutoff);
+      badge.textContent = t('cutoffOverrideBadge', { source: srcLabel });
+      if (
+        currentScope === 'lifetime' &&
+        meta.savedGlobalCutoffBytes !== null &&
+        meta.savedGlobalCutoffBytes !== undefined
+      ) {
+        badge.title = t('cutoffOverrideTip', {
+          source: srcLabel,
+          effective: effText,
+          saved: fmtCutoff(meta.savedGlobalCutoffBytes)
+        });
+      } else {
+        badge.title = t('cutoffOverrideTipNoSaved', {
+          source: srcLabel,
+          effective: effText
+        });
+      }
+      if (badge.dataset) badge.dataset.overrideSource = overrideSource;
+      badge.classList?.remove('hidden');
     }
 
     async function changeCutoff(newVal) {
@@ -5942,6 +6012,33 @@
           if (respData.globalCutoffBytes !== undefined) cachedStats.globalCutoffBytes = respData.globalCutoffBytes;
           if (respData.appCutoffBytes !== undefined) cachedStats.appCutoffBytes = respData.appCutoffBytes;
           if (respData.conversationCutoffBytes !== undefined) cachedStats.conversationCutoffBytes = respData.conversationCutoffBytes;
+          if (respData.globalCutoffSource !== undefined) cachedStats.globalCutoffSource = respData.globalCutoffSource;
+          if (respData.appCutoffSource !== undefined) cachedStats.appCutoffSource = respData.appCutoffSource;
+          if (respData.conversationCutoffSource !== undefined) cachedStats.conversationCutoffSource = respData.conversationCutoffSource;
+          if (respData.savedGlobalCutoffBytes !== undefined) cachedStats.savedGlobalCutoffBytes = respData.savedGlobalCutoffBytes;
+          if (respData.effectiveSource !== undefined) cachedStats.cutoffSource = respData.effectiveSource;
+          cachedStats.cutoffOverriddenBy = respData.overriddenBy ?? null;
+          if (respData.effectiveCutoffBytes !== undefined && mutScope === currentScope) {
+            cachedStats.cutoffBytes = respData.effectiveCutoffBytes;
+          }
+        }
+        if (currentScope === mutScope && respData && (respData.overriddenBy || cachedStats)) {
+          if (cachedStats) {
+            updateCutoffDropdown(cachedStats);
+          } else if (respData.effectiveCutoffBytes !== undefined) {
+            updateCutoffDropdown({
+              cutoffBytes: respData.effectiveCutoffBytes,
+              globalCutoffBytes: respData.globalCutoffBytes ?? respData.effectiveCutoffBytes,
+              appCutoffBytes: respData.appCutoffBytes ?? respData.effectiveCutoffBytes,
+              conversationCutoffBytes: respData.conversationCutoffBytes ?? respData.effectiveCutoffBytes,
+              cutoffSource: respData.effectiveSource,
+              globalCutoffSource: respData.globalCutoffSource ?? respData.effectiveSource,
+              appCutoffSource: respData.appCutoffSource,
+              conversationCutoffSource: respData.conversationCutoffSource,
+              savedGlobalCutoffBytes: respData.savedGlobalCutoffBytes ?? respData.savedCutoffBytes,
+              cutoffOverriddenBy: respData.overriddenBy ?? null
+            });
+          }
         }
         if (currentScope === mutScope && cutoffSelect && cutoffSelect.dataset) cutoffSelect.dataset.lastConfirmedCutoff = cutoffSelect.value;
         refreshData(true);
@@ -6955,6 +7052,7 @@
     }
 
     async function inspectSource(sourceId, encodedLabel) {
+      const reqSeq = ++searchRequestSeq;
       const label = decodeURIComponent(encodedLabel || '');
       const input = document.getElementById('search-input');
       if (input) input.value = label;
@@ -6967,8 +7065,10 @@
           method: 'POST',
           body: JSON.stringify({ sourceId })
         });
+        if (reqSeq !== searchRequestSeq) return;
         if (res.ok) {
           const data = await res.json();
+          if (reqSeq !== searchRequestSeq) return;
           if (data.chunks && data.chunks.length > 0) {
             resultsDiv.innerHTML = data.chunks.map((ch, idx) => {
               const bodyStr = typeof ch?.body === 'string' ? ch.body : String(ch?.body ?? '');
@@ -6988,9 +7088,11 @@
           }
         }
       } catch (err) {
+        if (reqSeq !== searchRequestSeq) return;
         console.error("Failed to load source chunks:", err);
       }
 
+      if (reqSeq !== searchRequestSeq) return;
       executeSearch();
     }
 
@@ -6998,6 +7100,7 @@
       const q = document.getElementById('search-input').value.trim();
       if (!q) return;
 
+      const reqSeq = ++searchRequestSeq;
       const resultsDiv = document.getElementById('search-results');
       resultsDiv.innerHTML = `<div class="muted-note">${escapeHtml(t('searchingFts'))}</div>`;
 
@@ -7007,8 +7110,10 @@
           method: 'POST',
           body: JSON.stringify({ query: q, scope: currentScope, conversationId: convId })
         });
+        if (reqSeq !== searchRequestSeq) return;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        if (reqSeq !== searchRequestSeq) return;
 
         if (data.hits && data.hits.length > 0) {
           resultsDiv.innerHTML = data.hits.map(h => `
@@ -7024,6 +7129,7 @@
           resultsDiv.innerHTML = `<div class="muted-note">${escapeHtml(t('noMatchingChunks'))}</div>`;
         }
       } catch (err) {
+        if (reqSeq !== searchRequestSeq) return;
         resultsDiv.innerHTML = `<div class="muted-note val-danger">${escapeHtml(t('searchFailed', { msg: err.message }))}</div>`;
       }
     }
@@ -10399,6 +10505,7 @@
         pendingCustomOverrideConvId = '';
         sawOutOfOrderWatchdogAction = false;
         ++watchdogActionSeq;
+        ++searchRequestSeq;
         if (scopeChanged) {
           applyScopeSelection('conversation');
         }
@@ -10449,6 +10556,7 @@
         pendingCustomOverrideConvId = '';
         sawOutOfOrderWatchdogAction = false;
         ++watchdogActionSeq;
+        ++searchRequestSeq;
         if (scopeChanged) {
           applyScopeSelection('conversation');
         }

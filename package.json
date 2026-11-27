@@ -1,6 +1,6 @@
 {
   "name": "agy-dart",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "type": "module",
   "description": "All-in-one Antigravity plugin uniting agy-fast latency batching, transparent CLI output filtering, KV-cache diagnostics, SQLite FTS5 context-window protection, and a live Sidecar dashboard with Stall Watchdog.",
   "license": "MIT",
@@ -26,6 +26,7 @@
     "safety:audit": "node scripts/cache-audit.mjs --safety-audit",
     "prefix:budget": "node scripts/prefix-budget.mjs",
     "verify:pkg": "node scripts/verify-package-graph.mjs",
+    "brief:sync": "node scripts/gen-review-brief.mjs --write",
     "brief:check": "node scripts/gen-review-brief.mjs --check",
     "test": "node --test tests/*.test.mjs"
   },

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { sha256Hex, stableStringify } from "./stable-json.js";
 import { redactSecrets } from "./security.js";
-import { listRecentConversationIdsFromSummaryDb } from "./watchdog-lease.js";
+import { queryRecentConversationIdsFromSummaryDb } from "./watchdog-lease.js";
 
 import {
   DEFAULT_CACHE_TTL_SEC,
@@ -18,6 +18,8 @@ import {
   MODEL_CACHE_PROFILES,
   resolveModelProfile,
   computeCacheWarmth,
+  computeKeepalivePingTokenSplit,
+  scheduleKeepAlivePings,
   roundUsd,
   estimateCostSavingsPct
 } from "./cache/profiles.js";
@@ -35,6 +37,8 @@ export {
   MODEL_CACHE_PROFILES,
   resolveModelProfile,
   computeCacheWarmth,
+  computeKeepalivePingTokenSplit,
+  scheduleKeepAlivePings,
   estimateCostSavingsPct
 };
 
@@ -6302,20 +6306,27 @@ function probeConversationTranscriptInRoot(resolvedRoot, safeId) {
   return null;
 }
 
-function findNewestTranscriptViaSummaryDb(brainRoot, maxCandidates = 32) {
-  if (!brainRoot || typeof brainRoot !== "string") return null;
+function findNewestTranscriptViaSummaryDb(brainRoot, maxCandidates = 32, { deadlineMs = null } = {}) {
+  if (!brainRoot || typeof brainRoot !== "string") {
+    return { hit: null, status: "missing", precision: "none" };
+  }
   const resolvedRoot = path.resolve(brainRoot);
-  const recentIds = listRecentConversationIdsFromSummaryDb(resolvedRoot, maxCandidates);
-  if (!Array.isArray(recentIds) || recentIds.length === 0) return null;
+  const query = queryRecentConversationIdsFromSummaryDb(resolvedRoot, maxCandidates, { deadlineMs });
+  if (query.status !== "ok" || !Array.isArray(query.ids) || query.ids.length === 0) {
+    return { hit: null, status: query.status, precision: query.precision };
+  }
   let best = null;
-  for (const cid of recentIds) {
+  for (const cid of query.ids) {
+    if (deadlineMs !== null && Date.now() >= deadlineMs) {
+      return { hit: best, status: "budget_exhausted", precision: query.precision };
+    }
     if (!isSafeConversationId(cid)) continue;
     const hit = probeConversationTranscriptInRoot(resolvedRoot, cid);
     if (hit && (!best || hit.mtimeMs > best.mtimeMs)) {
       best = hit;
     }
   }
-  return best;
+  return { hit: best, status: "ok", precision: query.precision };
 }
 
 /**
@@ -6440,30 +6451,48 @@ export function findTranscriptForConversation(conversationId = null, optionsOrEx
     }
   }
 
-  // Tier 1: Per-root O(1) recent-ID lookup via sibling conversation_summaries.db
-  // (avoids O(N) brain scan under unlimited history while never skipping custom roots without a DB)
+  // Single shared wall-clock deadline across ALL roots, summary-DB probes, and Tier-2 directory scans.
+  const deadlineMs = Date.now() + maxScanMs;
   let bestPath = null;
   let bestMtime = 0;
+  let degraded = false;
+  let hadHeuristicOnly = false;
   const rootsNeedingDirScan = [];
+
+  // Tier 1: Per-root O(1) recent-ID lookup via sibling conversation_summaries.db
   for (const root of roots) {
-    const summaryHit = findNewestTranscriptViaSummaryDb(root, 32);
-    if (summaryHit) {
-      if (summaryHit.mtimeMs > bestMtime) {
-        bestMtime = summaryHit.mtimeMs;
-        bestPath = summaryHit.path;
-      }
-    } else {
+    if (Date.now() >= deadlineMs) {
+      degraded = true;
+      break;
+    }
+    const summaryRes = findNewestTranscriptViaSummaryDb(root, 32, { deadlineMs });
+    if (summaryRes.status === "locked" || summaryRes.status === "budget_exhausted" || summaryRes.status === "error") {
+      degraded = true;
+    }
+    if (summaryRes.hit && summaryRes.hit.mtimeMs > bestMtime) {
+      bestMtime = summaryRes.hit.mtimeMs;
+      bestPath = summaryRes.hit.path;
+    }
+    if (!summaryRes.hit) {
+      rootsNeedingDirScan.push(root);
+    } else if (summaryRes.precision === "rowid_heuristic") {
+      // Large unindexed summary DB only samples recently inserted rowids; cross-check against
+      // bounded filesystem mtimes within the remaining shared deadline so recently updated older
+      // conversations are not masked by newer-rowid inserts.
+      hadHeuristicOnly = true;
       rootsNeedingDirScan.push(root);
     }
   }
 
-  // Tier 2: Streaming bounded brain directory scan fallback (all-entry cap + pre-read wall-clock budget)
+  // Tier 2: Streaming bounded brain directory scan fallback sharing the SAME absolute deadline
+  let budgetHit = false;
   if (rootsNeedingDirScan.length > 0) {
-    const scanStartMs = Date.now();
     let scannedEntries = 0;
-    let budgetHit = false;
     for (const root of rootsNeedingDirScan) {
-      if (budgetHit) break;
+      if (budgetHit || Date.now() >= deadlineMs) {
+        budgetHit = true;
+        break;
+      }
       let dir = null;
       try {
         dir = fs.opendirSync(root);
@@ -6472,7 +6501,7 @@ export function findTranscriptForConversation(conversationId = null, optionsOrEx
       }
       try {
         while (true) {
-          if (scannedEntries >= maxEntries || Date.now() - scanStartMs >= maxScanMs) {
+          if (scannedEntries >= maxEntries || Date.now() >= deadlineMs) {
             budgetHit = true;
             break;
           }
@@ -6493,8 +6522,11 @@ export function findTranscriptForConversation(conversationId = null, optionsOrEx
       }
     }
   }
+  if (budgetHit) degraded = true;
 
-  if (!noCache) {
+  // Never poison the negative cache after lock contention, I/O errors, or deadline/entry exhaustion.
+  const canCacheResult = !noCache && !(bestPath === null && degraded) && !(hadHeuristicOnly && degraded);
+  if (canCacheResult) {
     if (_latestTranscriptScanCache.size >= LATEST_TRANSCRIPT_SCAN_CACHE_MAX && !_latestTranscriptScanCache.has(cacheKey)) {
       const oldest = _latestTranscriptScanCache.keys().next().value;
       if (oldest !== undefined) _latestTranscriptScanCache.delete(oldest);

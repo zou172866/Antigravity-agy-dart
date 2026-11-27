@@ -313,6 +313,61 @@ export class ReadMethods {
     });
   }
 
+  /**
+   * Invalidate a pending/unconfirmed read record (and matching snapshot baseline) after a host
+   * reports that an allowed read call was cancelled or failed before entering context.
+   */
+  invalidatePendingFileRead({ sessionId, filePath, startLine = null, endLine = null } = {}) {
+    this.open();
+    const sid = sessionId || "default";
+    const norm = this._normalizeTrackPath(filePath);
+    if (!norm) return 0;
+    const hasStart = startLine !== null && startLine !== undefined && Number.isFinite(Number(startLine)) && Number(startLine) > 0;
+    const hasEnd = endLine !== null && endLine !== undefined && Number.isFinite(Number(endLine)) && Number(endLine) > 0;
+    return this._withWriteTx(() => {
+      let changes = 0;
+      if (hasStart) {
+        const reqStart = Math.floor(Number(startLine));
+        const reqEnd = hasEnd ? Math.floor(Number(endLine)) : -1;
+        const r1 = this.db
+          .prepare("DELETE FROM file_reads WHERE session_id = ? AND file_path = ? AND start_line = ? AND end_line = ?")
+          .run(sid, norm, reqStart, reqEnd);
+        changes += r1.changes || 0;
+        this.db
+          .prepare("DELETE FROM file_snapshots WHERE session_id = ? AND file_path = ? AND start_line = ? AND end_line = ?")
+          .run(sid, norm, reqStart, reqEnd);
+        // Also clear clamped/normalized ranges (e.g. >800-line requests clamped by computeEffectiveReadBounds)
+        if (changes === 0) {
+          if (hasEnd) {
+            const r2 = this.db
+              .prepare("DELETE FROM file_reads WHERE session_id = ? AND file_path = ? AND start_line = ? AND end_line > 0 AND end_line <= ?")
+              .run(sid, norm, reqStart, reqEnd);
+            changes += r2.changes || 0;
+            this.db
+              .prepare("DELETE FROM file_snapshots WHERE session_id = ? AND file_path = ? AND start_line = ? AND end_line > 0 AND end_line <= ?")
+              .run(sid, norm, reqStart, reqEnd);
+          } else {
+            const r2 = this.db
+              .prepare("DELETE FROM file_reads WHERE session_id = ? AND file_path = ? AND start_line = ?")
+              .run(sid, norm, reqStart);
+            changes += r2.changes || 0;
+            this.db
+              .prepare("DELETE FROM file_snapshots WHERE session_id = ? AND file_path = ? AND start_line = ?")
+              .run(sid, norm, reqStart);
+          }
+        }
+        return changes;
+      }
+      const rAll = this.db
+        .prepare("DELETE FROM file_reads WHERE session_id = ? AND file_path = ?")
+        .run(sid, norm);
+      this.db
+        .prepare("DELETE FROM file_snapshots WHERE session_id = ? AND file_path = ?")
+        .run(sid, norm);
+      return rAll.changes || 0;
+    });
+  }
+
   /** Invalidate cached unchanged file_reads for a canonical path across ALL sessions (preserving per-session file_snapshots) */
   invalidateFileReadsByPath(filePath) {
     this.open();

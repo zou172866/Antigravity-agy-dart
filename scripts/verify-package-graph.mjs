@@ -14,7 +14,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEVTOOLS_FILES, FILES_TO_COPY, RUNTIME_FILES } from "./install.mjs";
+import {
+  CONTEXT_MCP_TOOL_NAMES,
+  DEVTOOLS_FILES,
+  FAST_MCP_TOOL_NAMES,
+  FILES_TO_COPY,
+  RUNTIME_FILES
+} from "./install.mjs";
+
+const PACKAGE_MANIFEST_REL = "scripts/package-manifest.json";
+const EXPECTED_MANIFEST_SCHEMA_VERSION = 1;
 
 const __selfPath = path.resolve(fileURLToPath(import.meta.url));
 const __dirname = path.dirname(__selfPath);
@@ -1158,22 +1167,108 @@ export function collectImportGraph(entrypoints, rootDir = REPO_ROOT) {
   };
 }
 
-export function verifyPackageManifest(rootDir = REPO_ROOT) {
-  const runtimeSet = new Set(RUNTIME_FILES);
-  const devtoolsSet = new Set(DEVTOOLS_FILES);
-  const allSet = new Set(FILES_TO_COPY);
+function validateManifestFileList(list, fieldName, errors) {
+  if (!Array.isArray(list) || list.length === 0) {
+    errors.push(`${PACKAGE_MANIFEST_REL}: '${fieldName}' must be a non-empty array`);
+    return null;
+  }
+  const seen = new Set();
+  const normalizedList = [];
+  for (const raw of list) {
+    if (typeof raw !== "string" || !raw.trim()) {
+      errors.push(`${PACKAGE_MANIFEST_REL}: '${fieldName}' contains a non-string/empty entry`);
+      continue;
+    }
+    const clean = raw.replace(/\\/g, "/");
+    const norm = path.posix.normalize(clean);
+    if (!norm || norm === "." || norm.startsWith("..") || norm.startsWith("/") || norm !== clean) {
+      errors.push(`${PACKAGE_MANIFEST_REL}: '${fieldName}' contains unsafe/non-canonical path '${raw}'`);
+      continue;
+    }
+    if (seen.has(norm)) {
+      errors.push(`${PACKAGE_MANIFEST_REL}: '${fieldName}' contains duplicate entry '${norm}'`);
+      continue;
+    }
+    seen.add(norm);
+    normalizedList.push(norm);
+  }
+  return normalizedList;
+}
 
-  const missingOnDisk = FILES_TO_COPY.filter((rel) => !fs.existsSync(path.join(rootDir, rel)));
-  const overlap = RUNTIME_FILES.filter((rel) => devtoolsSet.has(rel));
+export function verifyPackageManifest(rootDir = REPO_ROOT) {
+  const manifestErrors = [];
+  let manifestSchemaVersion = null;
+  let runtimeFiles = [...RUNTIME_FILES];
+  let devtoolsFiles = [...DEVTOOLS_FILES];
+  let runtimeAssets = ["agents/dart-coder.md", "agents/dart-reviewer.md", "dsh/plugin.mjs"];
+  let targetModules = ["shared", "antigravity", "claude-code", "codex", "dsh", "index"].map(
+    (name) => "scripts/targets/" + name + ".mjs"
+  );
+
+  const manifestAbs = path.join(rootDir, PACKAGE_MANIFEST_REL);
+  if (!fs.existsSync(manifestAbs)) {
+    manifestErrors.push(`Missing declarative manifest '${PACKAGE_MANIFEST_REL}'`);
+  } else {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifestAbs, "utf8").replace(/^\uFEFF/, ""));
+      manifestSchemaVersion = parsed?.schemaVersion ?? null;
+      if (manifestSchemaVersion !== EXPECTED_MANIFEST_SCHEMA_VERSION) {
+        manifestErrors.push(
+          `${PACKAGE_MANIFEST_REL}: unsupported schemaVersion '${manifestSchemaVersion}' (expected ${EXPECTED_MANIFEST_SCHEMA_VERSION})`
+        );
+      }
+      const parsedRuntime = validateManifestFileList(parsed?.runtimeFiles, "runtimeFiles", manifestErrors);
+      const parsedDevtools = validateManifestFileList(parsed?.devtoolsFiles, "devtoolsFiles", manifestErrors);
+      const parsedAssets = validateManifestFileList(parsed?.runtimeAssets, "runtimeAssets", manifestErrors);
+      const parsedTargets = validateManifestFileList(parsed?.targetModules, "targetModules", manifestErrors);
+      if (parsedRuntime) {
+        runtimeFiles = parsedRuntime;
+        if (!parsedRuntime.includes(PACKAGE_MANIFEST_REL)) {
+          manifestErrors.push(`${PACKAGE_MANIFEST_REL}: runtimeFiles must include '${PACKAGE_MANIFEST_REL}'`);
+        }
+      }
+      if (parsedDevtools) devtoolsFiles = parsedDevtools;
+      if (parsedAssets) runtimeAssets = parsedAssets;
+      if (parsedTargets) targetModules = parsedTargets;
+      if (!Array.isArray(parsed?.fastMcpTools) || parsed.fastMcpTools.length === 0) {
+        manifestErrors.push(`${PACKAGE_MANIFEST_REL}: 'fastMcpTools' must be a non-empty array`);
+      }
+      if (!Array.isArray(parsed?.contextMcpTools) || parsed.contextMcpTools.length === 0) {
+        manifestErrors.push(`${PACKAGE_MANIFEST_REL}: 'contextMcpTools' must be a non-empty array`);
+      }
+      if (path.resolve(rootDir) === REPO_ROOT && parsedRuntime && parsedDevtools) {
+        if (JSON.stringify(parsedRuntime) !== JSON.stringify([...RUNTIME_FILES])) {
+          manifestErrors.push("scripts/install.mjs RUNTIME_FILES export diverged from scripts/package-manifest.json");
+        }
+        if (JSON.stringify(parsedDevtools) !== JSON.stringify([...DEVTOOLS_FILES])) {
+          manifestErrors.push("scripts/install.mjs DEVTOOLS_FILES export diverged from scripts/package-manifest.json");
+        }
+        if (JSON.stringify(parsed?.fastMcpTools || []) !== JSON.stringify([...FAST_MCP_TOOL_NAMES])) {
+          manifestErrors.push("scripts/install.mjs FAST_MCP_TOOL_NAMES export diverged from scripts/package-manifest.json");
+        }
+        if (JSON.stringify(parsed?.contextMcpTools || []) !== JSON.stringify([...CONTEXT_MCP_TOOL_NAMES])) {
+          manifestErrors.push("scripts/install.mjs CONTEXT_MCP_TOOL_NAMES export diverged from scripts/package-manifest.json");
+        }
+      }
+    } catch (err) {
+      manifestErrors.push(`Failed to parse '${PACKAGE_MANIFEST_REL}': ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const allFiles = [...runtimeFiles, ...devtoolsFiles];
+  const runtimeSet = new Set(runtimeFiles);
+  const devtoolsSet = new Set(devtoolsFiles);
+  const allSet = new Set(allFiles);
+
+  const missingOnDisk = allFiles.filter((rel) => !fs.existsSync(path.join(rootDir, rel)));
+  const overlap = runtimeFiles.filter((rel) => devtoolsSet.has(rel));
 
   const runtimeEntries = discoverRuntimeEntrypoints(rootDir);
-  const runtimeAssets = ["agents/dart-coder.md", "agents/dart-reviewer.md", "dsh/plugin.mjs"];
-  const targetModules = ["shared", "antigravity", "claude-code", "codex", "dsh", "index"].map(name => "scripts/targets/" + name + ".mjs");
   const runtimeGraph = collectImportGraph([...runtimeEntries, ...runtimeAssets, ...targetModules], rootDir);
   const missingFromRuntimeManifest = runtimeGraph.reachable.filter((rel) => !runtimeSet.has(rel));
   const devtoolsLeakedIntoRuntime = runtimeGraph.reachable.filter((rel) => devtoolsSet.has(rel));
 
-  const devtoolsGraph = collectImportGraph(DEVTOOLS_FILES, rootDir);
+  const devtoolsGraph = collectImportGraph(devtoolsFiles, rootDir);
   const missingFromFullManifest = devtoolsGraph.reachable.filter((rel) => !allSet.has(rel));
   const unresolvedSpecifiers = Array.from(
     new Set([...runtimeGraph.unresolvedSpecifiers, ...devtoolsGraph.unresolvedSpecifiers])
@@ -1184,6 +1279,7 @@ export function verifyPackageManifest(rootDir = REPO_ROOT) {
     binEntry = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8")).bin?.["agy-dart"]?.replace(/^\.\//, "");
   } catch { /* An incomplete package fails verification below. */ }
   const ok =
+    manifestErrors.length === 0 &&
     devtoolsSet.has(binEntry) && missingOnDisk.length === 0 &&
     overlap.length === 0 &&
     missingFromRuntimeManifest.length === 0 &&
@@ -1193,10 +1289,12 @@ export function verifyPackageManifest(rootDir = REPO_ROOT) {
 
   return {
     ok,
+    manifestSchemaVersion,
+    manifestErrors,
     runtimeEntrypoints: runtimeEntries,
     runtimeReachableCount: runtimeGraph.reachable.length,
-    runtimeManifestCount: RUNTIME_FILES.length,
-    devtoolsManifestCount: DEVTOOLS_FILES.length,
+    runtimeManifestCount: runtimeFiles.length,
+    devtoolsManifestCount: devtoolsFiles.length,
     missingOnDisk,
     overlap,
     missingFromRuntimeManifest,
@@ -1223,6 +1321,7 @@ if (isDirectRun) {
     console.log(`Package import-graph verification: ${report.ok ? "PASS" : "FAIL"}`);
     console.log(`  - Runtime entrypoints : ${report.runtimeEntrypoints.length} (${report.runtimeEntrypoints.join(", ")})`);
     console.log(`  - Reachable modules   : ${report.runtimeReachableCount} (manifest runtime=${report.runtimeManifestCount}, devtools=${report.devtoolsManifestCount})`);
+    if (report.manifestErrors?.length) console.error(`  - Manifest errors     : ${report.manifestErrors.join("; ")}`);
     if (report.missingOnDisk.length) console.error(`  - Missing on disk     : ${report.missingOnDisk.join(", ")}`);
     if (report.overlap.length) console.error(`  - Manifest overlap    : ${report.overlap.join(", ")}`);
     if (report.missingFromRuntimeManifest.length) console.error(`  - Missing from RUNTIME_FILES: ${report.missingFromRuntimeManifest.join(", ")}`);

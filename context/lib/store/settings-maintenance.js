@@ -1553,17 +1553,28 @@ export class SettingsMaintenanceMethods {
       const parsed = parseInt(raw, 10);
       return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
     };
+    const isGlobalScope = !sessionId || sessionId === "all" || sessionId === "lifetime";
     // 1. Session/Conversation override
-    if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
+    if (!isGlobalScope) {
       const sessionCutoff = parseMetaCutoff(this.getMeta(`cutoff:session:${sessionId}`));
       if (sessionCutoff !== null) {
-        return { cutoffBytes: sessionCutoff, source: "sqlite:session" };
+        return {
+          cutoffBytes: sessionCutoff,
+          source: "sqlite:session",
+          savedCutoffBytes: sessionCutoff,
+          overriddenBy: null
+        };
       }
       // If checking a conversation, fall back to the app session cutoff if set
       if (sessionId !== "app") {
         const appCutoff = parseMetaCutoff(this.getMeta("cutoff:session:app"));
         if (appCutoff !== null) {
-          return { cutoffBytes: appCutoff, source: "sqlite:app" };
+          return {
+            cutoffBytes: appCutoff,
+            source: "sqlite:app",
+            savedCutoffBytes: appCutoff,
+            overriddenBy: null
+          };
         }
       }
     }
@@ -1572,9 +1583,13 @@ export class SettingsMaintenanceMethods {
     const cfgSnap = getConfigSnapshot();
     const cfgMaxRead = cfgSnap.values.maxReadBytes;
     if (cfgMaxRead !== null && cfgMaxRead !== undefined && Number.isFinite(Number(cfgMaxRead))) {
+      const effSource = cfgSnap.sources.maxReadBytes === "env" ? "env" : "config";
+      const savedGlobalCutoff = parseMetaCutoff(this.getMeta("cutoff:global"));
       return {
         cutoffBytes: Math.max(0, Math.floor(Number(cfgMaxRead))),
-        source: cfgSnap.sources.maxReadBytes === "env" ? "env" : "config"
+        source: effSource,
+        savedCutoffBytes: isGlobalScope ? savedGlobalCutoff : null,
+        overriddenBy: isGlobalScope ? effSource : null
       };
     }
 
@@ -1584,12 +1599,14 @@ export class SettingsMaintenanceMethods {
       const metaSrc = this.getMeta("cutoff:source", null);
       return {
         cutoffBytes: globalCutoff,
-        source: metaSrc === "installer_default" ? "sqlite:installer_default" : "sqlite:user"
+        source: metaSrc === "installer_default" ? "sqlite:installer_default" : "sqlite:user",
+        savedCutoffBytes: globalCutoff,
+        overriddenBy: null
       };
     }
 
     // 4. Default 45 KiB (46,080 B — aligns with Antigravity read_file host cap & <= 800-line window)
-    return { cutoffBytes: DEFAULT_CUTOFF_BYTES, source: "default" };
+    return { cutoffBytes: DEFAULT_CUTOFF_BYTES, source: "default", savedCutoffBytes: null, overriddenBy: null };
   }
 
   /** Get active cutoff in bytes (0 = none/disabled) */

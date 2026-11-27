@@ -1146,7 +1146,28 @@ test("P1-Hardening 3: Static import-graph verification proves RUNTIME_FILES comp
       'test.skip("case 3", () => {});'
     ].join("\n");
     assert.equal(countTestCasesInSource(briefCounterSample), 3, "countTestCasesInSource must ignore regex quotes/`/*`/templates/comments/function* decls and count top-level tests + modifiers accurately");
-    assert.equal(computeBriefMetrics(ROOT).testCases, 382, "computeBriefMetrics(ROOT).testCases must match the 382 tests executed by npm test");
+    const rootBriefMetrics = computeBriefMetrics(ROOT);
+    const actualTestFiles = fs.readdirSync(path.join(ROOT, "tests")).filter((f) => f.endsWith(".test.mjs")).sort();
+    const recountedCases = actualTestFiles.reduce(
+      (sum, file) => sum + countTestCasesInSource(fs.readFileSync(path.join(ROOT, "tests", file), "utf8")),
+      0
+    );
+    assert.equal(
+      rootBriefMetrics.testFiles,
+      actualTestFiles.length,
+      "computeBriefMetrics(ROOT).testFiles must match every tests/*.test.mjs file on disk"
+    );
+    assert.equal(
+      rootBriefMetrics.testCases,
+      recountedCases,
+      "computeBriefMetrics(ROOT).testCases must match the sum across all discovered test files"
+    );
+    assert.ok(rootBriefMetrics.testCases >= 380, `Expected full regression suite (>= 380 cases), got ${rootBriefMetrics.testCases}`);
+    assert.deepEqual(
+      rootBriefMetrics.untrackedSourceFiles,
+      [],
+      `gen-review-brief.mjs must cover every workspace source file; untracked: ${rootBriefMetrics.untrackedSourceFiles.join(", ")}`
+    );
 
     // P0-3: syncBriefFile normalizes CRLF checkouts on Windows CI and .gitattributes enforces LF/CRLF policy
     const gitAttrsPath = path.join(ROOT, ".gitattributes");

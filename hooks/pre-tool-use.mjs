@@ -2523,8 +2523,8 @@ export async function evaluatePreToolPayload(rawPayload) {
                   });
                   const rangeLabel = effectiveEndLine !== null ? `lines ${startLine}-${effectiveEndLine}` : "full file";
                   const dedupReason =
-                    `[agy-dart read-dedup] '${filePath}' (${rangeLabel}, ~${formatBytes(estBytes)}) was already read unchanged earlier in this session ` +
-                    `(mtime & size identical). Reuse the copy already in context to save tokens; if context was compacted and you truly need a fresh copy, call ${toolName} once more to bypass.`;
+                    `[agy-dart read-dedup] '${filePath}' (${rangeLabel}, ~${formatBytes(estBytes)}) was already allowed unchanged earlier in this session ` +
+                    `(mtime & size identical). Reuse the copy in context if it completed; if that earlier read was cancelled/failed or context was compacted, call ${toolName} once more to retry immediately.`;
 
                   recordInterception({
                     sessionId,

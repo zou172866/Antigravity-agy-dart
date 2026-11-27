@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 Send this to Antigravity:
 
 ```text
-Clone tag v1.9.3 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.9.4 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.9.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.9.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,13 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.9.4
+- **Full v1.9.3 audit remediation (all 23 findings resolved — 2 P1, 18 P2, 3 P3)**:
+  - **Multi-host installer integrity & concurrency**: Codex installer rejects closed inline `mcp_servers = {}` / conflicting tables before writing; DSH uninstall preserves user-appended/prepended YAML list items and tracks multiple profiles so shared runtime is retained until all profiles are removed; `scripts/targets/index.mjs` upgrades `targets.lock` with token metadata, fresh-lock grace window, `EPERM` handling, and race-safe `.reclaim` stale-lock recovery.
+  - **Declarative packaging & atomic self-update**: Extracted `scripts/package-manifest.json` (`schemaVersion: 1`) as the single source of truth for `install.mjs`, `verify:pkg`, and `version-update.mjs`; pinned approved release asset URL & SHA-256 across auto-update cycles (never downgrading to source tarball); made secondary-host sync atomic with reverse rollback and user-file preservation; tightened legacy parser & zero-devtools fallback.
+  - **Protocol, logging, security & cache accuracy**: Enforced strict `<= 8,800 B` outer JSON-RPC wire cap on all `agy-dart_context` responses; preserved trailing root-cause errors in `cli-filter.mjs` overflow preview/FTS5/checkpoint; upgraded Safety Monitor incremental scanner to raw byte offsets (`committedOffset`) with split-UTF-8 safety and `parseStatus`; enforced shared wall-clock deadlines across multi-root history lookup and DNS validation (`validateFetchTarget`); added OS/toolchain child-process env allowlist + hard secret filtering (`execEnvAllowlist`); reduced Watchdog idle `config.json` stats (`1,440 → <= 40` / 40 ticks) via `withConfigSnapshot()`; unified keep-alive simulator endpoint scheduling and Gemini 4 2,050-token tail reprocessing (`$0.031854` / Carbon 120K ping).
+  - **Dashboard UX, accessibility & governance**: Invalidated pending read cache on cancelled/failed reads; fixed out-of-order search/inspect responses with shared request sequence; fixed MCP App card shrink height & teardown RAF cancel; raised Catppuccin Mocha placeholder contrast to WCAG AA (`#7f849c`); localized region `aria-label`s in Chinese; surfaced `config.json`/`env` cutoff override provenance in `/api/cutoff`, `/api/stats`, and UI badge; expanded `AI_REVIEW_BRIEF.md` to 55/55 full source coverage and updated `SECURITY.md` (`1.9.x` / `1.8.x`).
 
 ### v1.9.3
 - **Catppuccin Mocha dark theme & zero-flash startup (thanks `@Ansg2022` in #8)**: Added a full Catppuccin Mocha dark theme to the Sidecar dashboard with automatic system-preference detection, left-click Light/Mocha toggle, right-click or `Shift+Click` / `Shift+Enter` reset back to system theme, and an inline `<script data-theme-init>` FOUC guard so dark mode loads with zero white flash.

@@ -241,6 +241,8 @@ function runCommandCaptured(command, unwrapFn = null, helpers = {}) {
     const overflowTailArmBytes = Math.max(0, MAX_CAPTURE_BYTES - MAX_OVERFLOW_TAIL_BYTES);
     let outLen = 0;
     let errLen = 0;
+    let outTotalBytes = 0;
+    let errTotalBytes = 0;
     let lastOutByte = -1;
     let lastErrByte = -1;
     let outTruncated = false;
@@ -251,6 +253,7 @@ function runCommandCaptured(command, unwrapFn = null, helpers = {}) {
       if (!chunk || chunk.length === 0) return;
       const prevLen = outLen;
       const prevByte = lastOutByte;
+      outTotalBytes += chunk.length;
       if (outLen < MAX_CAPTURE_BYTES) {
         const take = Math.min(chunk.length, MAX_CAPTURE_BYTES - outLen);
         outChunks.push(take === chunk.length ? chunk : chunk.subarray(0, take));
@@ -281,6 +284,7 @@ function runCommandCaptured(command, unwrapFn = null, helpers = {}) {
       }
       const prevLen = errLen;
       const prevByte = lastErrByte;
+      errTotalBytes += chunk.length;
       if (errLen < MAX_CAPTURE_BYTES) {
         const take = Math.min(chunk.length, MAX_CAPTURE_BYTES - errLen);
         errChunks.push(take === chunk.length ? chunk : chunk.subarray(0, take));
@@ -394,6 +398,8 @@ function runCommandCaptured(command, unwrapFn = null, helpers = {}) {
         stderrOverflowTail: errTruncated && errTailBuf.hasData() ? errTailBuf.decodeUtf8() : "",
         outTruncated,
         errTruncated,
+        outTotalBytes,
+        errTotalBytes,
         exitCode: code !== null && code !== undefined ? code : signal ? 1 : 0,
         truncatedCapture,
         execCwd,
@@ -401,6 +407,21 @@ function runCommandCaptured(command, unwrapFn = null, helpers = {}) {
       });
     });
   });
+}
+
+function assembleStreamWithOverflowTail(headText, tailText, wasTruncated, totalBytes = 0) {
+  if (!wasTruncated || !tailText) return headText || "";
+  const completeHead = stripTrailingTruncatedLine(headText || "", true);
+  const headBytes = Buffer.byteLength(completeHead, "utf8");
+  const tailBytes = Buffer.byteLength(tailText, "utf8");
+  const effectiveTotal = Math.max(totalBytes || 0, headBytes + tailBytes);
+  const omittedBytes = Math.max(0, effectiveTotal - headBytes - tailBytes);
+  const sep = completeHead && !completeHead.endsWith("\n") ? "\n" : "";
+  const marker =
+    omittedBytes > 0
+      ? `${sep}[... agy-dart omitted ~${omittedBytes} bytes between captured 2 MiB head and trailing ${tailBytes} B tail (total stream ${effectiveTotal} B) ...]\n`
+      : `${sep}[... agy-dart 2 MiB capture boundary (trailing ${tailBytes} B preserved below) ...]\n`;
+  return `${completeHead}${marker}${tailText}`;
 }
 
 function stripTrailingTruncatedLine(text, wasTruncated) {
@@ -534,10 +555,25 @@ async function main() {
   const redErrTail = res.stderrOverflowTail ? redactSecrets(res.stderrOverflowTail) : { text: "", redactedCount: 0 };
   const safeOutTail = redOutTail.text;
   const safeErrTail = redErrTail.text;
+  const effectiveStdout = assembleStreamWithOverflowTail(
+    safeStdout,
+    safeOutTail,
+    Boolean(res.outTruncated),
+    res.outTotalBytes
+  );
+  const effectiveStderr = assembleStreamWithOverflowTail(
+    safeStderr,
+    safeErrTail,
+    Boolean(res.errTruncated),
+    res.errTotalBytes
+  );
+  const effectiveCapturedStderr = safeCapturedStderr
+    ? assembleStreamWithOverflowTail(safeCapturedStderr, safeErrTail, Boolean(res.errTruncated), res.errTotalBytes)
+    : "";
 
   const rawCombined =
-    safeStdout +
-    (safeStderr ? (safeStdout && !safeStdout.endsWith("\n") ? "\n" : "") + safeStderr : "");
+    effectiveStdout +
+    (effectiveStderr ? (effectiveStdout && !effectiveStdout.endsWith("\n") ? "\n" : "") + effectiveStderr : "");
   const rawBytes = Buffer.byteLength(rawCombined, "utf8");
 
   let sourceId = null;
@@ -545,7 +581,7 @@ async function main() {
   let effectiveSessionId = sessionId;
   const effectiveCwd = res.execCwd || process.cwd();
 
-  // Index full raw output (redacted) into SQLite FTS5 when non-trivial so filtered details stay searchable
+  // Index redacted output (head + omitted-middle marker + trailing 64 KiB tail when >2 MiB) into SQLite FTS5
   if (rawBytes >= 2048 || (res.exitCode !== 0 && rawBytes >= 1024)) {
     try {
       store = new ContextModeStore({ hookMode: true });
@@ -570,19 +606,20 @@ async function main() {
   const totalRedacted = redOut.redactedCount + redErr.redactedCount + redOutTail.redactedCount + redErrTail.redactedCount;
   const effectiveNote = [
     note,
-    res.truncatedCapture ? "raw stream capped at 2MB" : "",
+    res.truncatedCapture ? "raw stream capped at 2MB (middle omitted; tail preserved)" : "",
     totalRedacted > 0 ? `redacted ${totalRedacted} secret(s)` : ""
   ]
     .filter(Boolean)
     .join("; ");
 
-  const filtered = applyFilterRule(ruleId, safeStdout, safeStderr, res.exitCode, {
+  const filtered = applyFilterRule(ruleId, effectiveStdout, effectiveStderr, res.exitCode, {
     cwd: effectiveCwd,
     fallbackCwd: process.cwd(),
     command: res.innerCommand || command,
-    capturedStderr: safeCapturedStderr,
+    capturedStderr: effectiveCapturedStderr,
     maxBytes: MAX_FILTERED_OUTPUT_BYTES,
     note: effectiveNote || null,
+    truncatedCapture: Boolean(res.truncatedCapture),
     sourceId
   });
 

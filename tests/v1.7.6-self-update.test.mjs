@@ -161,12 +161,16 @@ function createReleaseArchiveEntries(
     rootPrefix = `Antigravity-agy-dart-${version}`,
     extraRuntimeFiles = {},
     includeDevtools = false,
+    includeManifest = true,
     brokenImport = false,
     brokenMultilineImport = false,
     serverSource = null
   } = {}
 ) {
-  const runtimeList = [...RUNTIME_FILES, ...Object.keys(extraRuntimeFiles)];
+  const runtimeList = [
+    ...(includeManifest ? RUNTIME_FILES : RUNTIME_FILES.filter((f) => f !== "scripts/package-manifest.json")),
+    ...Object.keys(extraRuntimeFiles)
+  ];
   const devtoolsList = includeDevtools ? [...DEVTOOLS_FILES] : [];
   const installScript = `export const FAST_MCP_TOOL_NAMES = Object.freeze(["apply_edits", "batch_search", "read_slices", "run_checks"]);
 export const CONTEXT_MCP_TOOL_NAMES = Object.freeze(["ctx_batch", "ctx_doctor", "ctx_execute", "ctx_index", "ctx_purge", "ctx_resume", "ctx_search", "ctx_stats"]);
@@ -181,11 +185,36 @@ export const DEVTOOLS_FILES = Object.freeze(${JSON.stringify(devtoolsList, null,
   const hooksJson = fs.readFileSync(path.join(ROOT, "hooks.json"), "utf8");
 
   const filesMap = new Map();
-  for (const rel of RUNTIME_FILES) {
+  for (const rel of runtimeList) {
     filesMap.set(rel, `// stub for ${rel} v${version}\n`);
   }
   for (const rel of devtoolsList) {
     filesMap.set(rel, `// devtools stub for ${rel} v${version}\n`);
+  }
+  if (includeManifest) {
+    filesMap.set(
+      "scripts/package-manifest.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          runtimeFiles: runtimeList,
+          devtoolsFiles: devtoolsList,
+          fastMcpTools: ["apply_edits", "batch_search", "read_slices", "run_checks"],
+          contextMcpTools: [
+            "ctx_batch",
+            "ctx_doctor",
+            "ctx_execute",
+            "ctx_index",
+            "ctx_purge",
+            "ctx_resume",
+            "ctx_search",
+            "ctx_stats"
+          ]
+        },
+        null,
+        2
+      )
+    );
   }
   filesMap.set("plugin.json", JSON.stringify({ name: "agy-dart", version }, null, 2));
   filesMap.set("package.json", JSON.stringify({ name: "agy-dart", version, type: "module" }, null, 2));

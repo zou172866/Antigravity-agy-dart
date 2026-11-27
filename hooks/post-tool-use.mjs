@@ -1244,6 +1244,36 @@ export async function processPostToolPayload(rawPayload) {
   const fastToolName = extractFastSavingsToolName(toolCall);
   const fastFingerprint = fastToolName ? fastToolFingerprint(fastToolName, responseText) : null;
   const responseIsError = extractResponseIsError(payload);
+  const bareToolName = stripHostNamespace(toolName);
+  const isReadTool = bareToolName === "read_file" || bareToolName === "view_file" || bareToolName === "read";
+  const readWasCancelledOrFailed =
+    isReadTool &&
+    (responseIsError ||
+      payload.cancelled === true ||
+      payload.aborted === true ||
+      payload.isCancelled === true ||
+      payload.is_cancelled === true ||
+      String(payload.status || "").toLowerCase() === "cancelled" ||
+      String(payload.status || "").toLowerCase() === "aborted" ||
+      String(payload.status || "").toLowerCase() === "error");
+  let failedReadTarget = null;
+  if (readWasCancelledOrFailed) {
+    const rawReadPath = cleanPath(
+      args.Path || args.path || args.AbsolutePath || args.absolute_path || args.file_path || args.filePath || args.TargetFile
+    );
+    if (rawReadPath) {
+      const absReadPath = path.isAbsolute(rawReadPath) ? path.normalize(rawReadPath) : path.resolve(cwd, rawReadPath);
+      const rawStart = args.StartLine ?? args.startLine ?? args.start_line ?? args.offset;
+      const rawEnd = args.EndLine ?? args.endLine ?? args.end_line;
+      const rawLimit = args.limit ?? args.Limit;
+      const startLine = Number.isFinite(Number(rawStart)) && Number(rawStart) > 0 ? Math.floor(Number(rawStart)) : null;
+      let endLine = Number.isFinite(Number(rawEnd)) && Number(rawEnd) > 0 ? Math.floor(Number(rawEnd)) : null;
+      if (endLine === null && startLine !== null && Number.isFinite(Number(rawLimit)) && Number(rawLimit) > 0) {
+        endLine = startLine + Math.floor(Number(rawLimit)) - 1;
+      }
+      failedReadTarget = { absPath: absReadPath, startLine, endLine };
+    }
+  }
   const verifySignal = extractVerificationSignal(toolName, args, responseText);
 
   const effectiveCfg = getEffectiveConfig();
@@ -1251,9 +1281,9 @@ export async function processPostToolPayload(rawPayload) {
   const shouldTouchWatchdog =
     Boolean(effectiveCfg.stallWatchdog) &&
     Boolean(directConvId && directConvId !== "default") &&
-    (clearAllSession || paths.length > 0 || Boolean(verifySignal) || fs.existsSync(resolvedDbPath));
+    (clearAllSession || paths.length > 0 || Boolean(failedReadTarget) || Boolean(verifySignal) || fs.existsSync(resolvedDbPath));
 
-  if (clearAllSession || paths.length > 0 || verifySignal || shouldTouchWatchdog || receipt || fastFingerprint) {
+  if (clearAllSession || paths.length > 0 || failedReadTarget || verifySignal || shouldTouchWatchdog || receipt || fastFingerprint) {
     let store = null;
     try {
       const [{ ContextModeStore }, { redactSecrets }, watchdogLeaseMod, filterRulesMod] = await Promise.all([
@@ -1278,6 +1308,34 @@ export async function processPostToolPayload(rawPayload) {
           worktree: cwd,
           directConvId
         });
+      }
+      if (failedReadTarget && typeof store.invalidatePendingFileRead === "function") {
+        const invalidateCancelledRead = (targetPath) => {
+          store.invalidatePendingFileRead({
+            sessionId,
+            filePath: targetPath,
+            startLine: failedReadTarget.startLine,
+            endLine: failedReadTarget.endLine
+          });
+          if (directConvId && directConvId !== sessionId) {
+            store.invalidatePendingFileRead({
+              sessionId: directConvId,
+              filePath: targetPath,
+              startLine: failedReadTarget.startLine,
+              endLine: failedReadTarget.endLine
+            });
+          }
+        };
+        invalidateCancelledRead(failedReadTarget.absPath);
+        const realReadTarget = resolveRealPathBestEffort(failedReadTarget.absPath);
+        if (
+          realReadTarget &&
+          (process.platform === "win32"
+            ? realReadTarget.toLowerCase() !== failedReadTarget.absPath.toLowerCase()
+            : realReadTarget !== failedReadTarget.absPath)
+        ) {
+          invalidateCancelledRead(realReadTarget);
+        }
       }
       if (clearAllSession) {
         store.invalidateFileReads(sessionId, null);

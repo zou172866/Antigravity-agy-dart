@@ -367,6 +367,8 @@ export function extractFailureExcerpt(text, { maxLines = 5, maxBytes = 500 } = {
       anchorPosInSelected = 1;
     }
     chosenIndices.push(firstAnchorIdx);
+    const seenLineTexts = new Set(chosenIndices.map((idx) => lines[idx]));
+    const specSummaryCounterRe = /^ℹ\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/i;
     for (let i = firstAnchorIdx + 1; i < lines.length && chosenIndices.length < lineCap; i++) {
       if (isTapDirectiveResultLine(lines[i])) {
         i = skipTapYamlBlock(entries, i);
@@ -374,11 +376,16 @@ export function extractFailureExcerpt(text, { maxLines = 5, maxBytes = 500 } = {
       }
       if (
         isPassingNoiseLine(lines[i]) ||
+        specSummaryCounterRe.test(lines[i]) ||
         FAILURE_EXCERPT_NON_ANCHOR_RE.test(lines[i]) ||
         FAILURE_EXCERPT_TAP_META_NOISE_RE.test(lines[i])
       ) {
         continue;
       }
+      if (seenLineTexts.has(lines[i])) {
+        continue;
+      }
+      seenLineTexts.add(lines[i]);
       chosenIndices.push(i);
     }
     selectedLines = chosenIndices.map((idx) => lines[idx]);
@@ -3659,8 +3666,9 @@ export function applyFilterRule(ruleId, rawStdout, rawStderr, exitCode = 0, opti
   if (options.note) noteParts.push(options.note);
   const passingTest = exitCode === 0 && (ruleId === "test-runner" || ruleId === "playwright");
   const queryHint = passingTest ? "use ctx_search for details missing from this preview" : "query via agy-dart_context ctx_search";
+  const indexLabel = options.truncatedCapture ? "head+tail output indexed" : "full output indexed";
   const sourceHint = options.sourceId
-    ? ` full output indexed as ${options.sourceId} (${queryHint})`
+    ? ` ${indexLabel} as ${options.sourceId} (${queryHint})`
     : "";
 
   const reserveFooter = Math.max(

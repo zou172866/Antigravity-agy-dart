@@ -58,7 +58,7 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 ### 其他贴心小功能
 1. **压缩对话（`/compact`）后不断片**：后台自动记着改过哪些文件、最近测试过没过、存了哪些资料，压缩完 AI 直接接着往下做。
 2. **长文档与网页存本地按需搜**：几万字的开发文档或网页按章节存进本机，用到哪段按关键词搜哪段，不硬塞进对话。
-3. **大日志和大表格先在本地筛完再汇报**：几十 MB 的日志、CSV 或几万行 JSON，AI 先在本地沙盒跑几行脚本做统计（比如筛出报错最多的 5 个接口），只把结论带回对话；大 JSON 还会自动挑出报错的异常条。
+3. **大日志和大表格先在本地筛完再汇报**：几十 MB 的日志、CSV 或几万行 JSON，AI 先在本地受限脚本执行器（以当前系统用户身份运行，采用环境变量白名单并过滤凭据、封顶输出）跑几行脚本做统计（比如筛出报错最多的 5 个接口），只把结论带回对话；大 JSON 还会自动挑出报错的异常条。
 4. **新对话自动附带项目目录**：刚开对话时自动给 AI 一份精简目录、常用脚本和核心文件清单，不用每次从头摸黑找文件。
 5. **死循环及时喊停**：AI 连续出现「改代码 → 报错 → 改回去 → 又报错」或原地打转时，在界面弹一条只给你看的提示（不占模型上下文）。
 6. **密钥打码与敏感文件防护**：日志和网页里的 API Key、口令自动打码；可挡住 AI 误读 `.env` 等敏感文件，并防止陌生仓库的 Git 配置偷偷执行外部命令。
@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.9.3 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.9.4 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.9.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.9.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,13 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.9.4
+- **v1.9.3 全量审计 23 项发现全部闭环修复（2 P1 / 18 P2 / 3 P3）**：
+  - **多宿主安装完整性与并发锁**：Codex 安装前拦截至顶层封闭内联表 `mcp_servers = {}` 与冲突键，不再写坏合法 TOML；DSH 卸载保留用户追加/前插的 YAML 列表项并按多 profile 独立登记收据，避免提前清理共享运行时；多宿主互斥锁 `targets.lock` 升级为 token 元数据 + 新建宽限窗口 + `EPERM` 保护 + 并发安全 `.reclaim` 失效锁回收。
+  - **声明式打包清单与原子自更新**：抽取单一事实源 `scripts/package-manifest.json`（`schemaVersion: 1`）供安装、打包图校验与在线自更新共用，收紧旧版字面量解析并彻底消除 fallback 开发工具泄漏；自动更新全链路固定批准资产 URL 与 SHA-256（严禁降级源码包）；次宿主同步升级为同盘暂存 + 逆序回滚并保护用户自有文件。
+  - **协议线长、大日志根因、安全与缓存精度**：`agy-dart_context` 所有工具/错误/UI 响应强制外层 JSON-RPC 单行 `<= 8,800 B`；`cli-filter.mjs` 大输出截断将脱敏尾环并入预览、FTS5 索引与检查点，不再丢失末尾根因；Safety Monitor 改用原始字节偏移安全续读跨轮拆分行与 UTF-8 字符并暴露 `parseStatus`；多根历史查找与 URL DNS 解析统一受共享墙钟截止约束；执行器落地 OS/工具链环境白名单 + 敏感凭据硬过滤（支持 `execEnvAllowlist`）；Watchdog 单 tick 共享配置快照（40 轮空闲配置 `statSync` 从 `1,440` 降至 `<= 40`）；离线续温模拟器统一端点调度并计入 Gemini 4 2,050-token 尾部重算。
+  - **面板体验、无障碍与文档治理**：取消/失败读取自动失效待定读缓存；搜索与查看来源共用请求序号防乱序覆盖；内联诊断卡片内容收缩正确回缩高度并在销毁时取消 RAF；Mocha 输入框占位文字提升至 WCAG AA 对比度（`#7f849c`）；补齐中文区域 `aria-label` 与读阈值 `config.json`/`env` 覆盖来源徽标；`AI_REVIEW_BRIEF.md` 扩至 55/55 全仓源文件自动覆盖，`SECURITY.md` 更新支持 `1.9.x` / `1.8.x`。
 
 ### v1.9.3
 - **右侧面板新增 Catppuccin Mocha 暗黑主题与首屏防白闪（感谢 `@Ansg2022` 贡献 #8）**：支持默认跟随系统深浅色、左键在浅色与 Mocha 深色间一键切换、右键或 `Shift+Click` / `Shift+Enter` 恢复跟随系统，并加入首屏防白闪（FOUC）初始化脚本，打开即暗黑不刺眼。

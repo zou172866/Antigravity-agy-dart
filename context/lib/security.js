@@ -267,11 +267,38 @@ export async function validateFetchTarget(urlStr, options = {}) {
     throw new Error(`Blocked SSRF target hostname '${bareHost}'`);
   }
 
+  const timeoutMs =
+    Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
+      ? Math.floor(Number(options.timeoutMs))
+      : null;
+
   let records;
   try {
-    const res = await lookupFn(bareHost, { all: true, verbatim: true });
+    const lookupPromise = Promise.resolve().then(() => lookupFn(bareHost, { all: true, verbatim: true }));
+    // Swallow any late rejection if timeout wins the race so Node never emits unhandledRejection.
+    lookupPromise.catch(() => {});
+    let res;
+    if (timeoutMs !== null) {
+      let dnsTimer = null;
+      try {
+        res = await Promise.race([
+          lookupPromise,
+          new Promise((_, reject) => {
+            dnsTimer = setTimeout(() => reject(new Error("Request timed out")), timeoutMs);
+            dnsTimer.unref?.();
+          })
+        ]);
+      } finally {
+        if (dnsTimer) clearTimeout(dnsTimer);
+      }
+    } else {
+      res = await lookupPromise;
+    }
     records = Array.isArray(res) ? res : res ? [res] : [];
   } catch (err) {
+    if (err?.message === "Request timed out") {
+      throw err;
+    }
     throw new Error(`DNS lookup failed for '${bareHost}': ${err?.message || err}`);
   }
 

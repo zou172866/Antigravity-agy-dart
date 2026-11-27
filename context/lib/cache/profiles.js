@@ -343,3 +343,54 @@ export function estimateCostSavingsPct(
   const pctVal = Number((((totalInputAll - actualCostEquiv) / totalInputAll) * 100).toFixed(1));
   return Object.is(pctVal, -0) ? 0 : pctVal;
 }
+
+/**
+ * Event-driven keep-alive ping scheduler shared across 1x and multi-ping policies.
+ * A keep-alive timer fires every `pingIntervalSec` seconds of continuous idle time;
+ * durations strictly shorter than `pingIntervalSec` never fire a ping (0 pings).
+ */
+export function scheduleKeepAlivePings(durationSec, { pingIntervalSec = 255, maxPings = 1 } = {}) {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return { rawPings: 0, pings: 0, capped: false };
+  }
+  const safeInterval = Number.isFinite(pingIntervalSec) && pingIntervalSec > 0 ? Math.floor(pingIntervalSec) : 255;
+  const safeMax = Number.isFinite(maxPings) && maxPings >= 0 ? Math.floor(maxPings) : 1;
+  if (safeMax === 0 || durationSec < safeInterval) {
+    return { rawPings: 0, pings: 0, capped: false };
+  }
+  const rawPings = Math.floor(durationSec / safeInterval);
+  const pings = Math.min(safeMax, rawPings);
+  return {
+    rawPings,
+    pings,
+    capped: rawPings > safeMax
+  };
+}
+
+/**
+ * Split a single keep-alive ping's input tokens into discounted cached-read vs full-price
+ * uncached tokens, honoring model-specific trailing-window reprocessing (e.g., Gemini 4's
+ * 2,050-token minimum turn delta threshold re-processes the trailing 2,050 tokens at 1.0x
+ * whenever `pingOverheadTokens < minTurnDeltaForFullCache`).
+ */
+export function computeKeepalivePingTokenSplit(
+  contextTokens = 0,
+  { pingOverheadTokens = 16, tailReprocessTokens = null, profile = null } = {}
+) {
+  const safeCtx = Number.isFinite(contextTokens) && contextTokens > 0 ? Math.floor(contextTokens) : 0;
+  const safeOverhead =
+    Number.isFinite(pingOverheadTokens) && pingOverheadTokens >= 0 ? Math.floor(pingOverheadTokens) : 16;
+  const rawTail =
+    tailReprocessTokens !== null && tailReprocessTokens !== undefined && Number.isFinite(Number(tailReprocessTokens))
+      ? Math.max(0, Math.floor(Number(tailReprocessTokens)))
+      : Math.max(0, Math.floor(Number(profile?.minTurnDeltaForFullCache) || 0));
+  const reprocessedTailTokens =
+    safeCtx > 0 && rawTail > 0 && safeOverhead < rawTail ? Math.min(safeCtx, rawTail) : 0;
+  const cachedReadTokens = Math.max(0, safeCtx - reprocessedTailTokens);
+  const uncachedTokens = safeOverhead + reprocessedTailTokens;
+  return {
+    cachedReadTokens,
+    uncachedTokens,
+    reprocessedTailTokens
+  };
+}
