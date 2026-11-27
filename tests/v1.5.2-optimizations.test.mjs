@@ -308,7 +308,7 @@ test("v1.5.2-4: read_slices({ outlines }) extracts indented HTML (<style>/<body>
     assert.ok(htmlText.includes("[style] <style>"), "HTML outline must include indented <style> block");
     assert.ok(htmlText.includes("[body] <body>"), "HTML outline must include <body> landmark");
     assert.ok(htmlText.includes("[script] <script>"), "HTML outline must include indented <script> block");
-    assert.ok(htmlText.includes("refreshData"), "HTML outline must extract indented JS functions inside <script>");
+    assert.ok(htmlText.includes("detectInitialLang"), "HTML outline must extract indented JS functions inside <script>");
     assert.ok(dartText.includes("[mixin] CacheableMixin"), "Dart outline must include mixin");
     assert.ok(dartText.includes("[class] TokenService"), "Dart outline must include base class");
     assert.ok(dartText.includes("fetchToken"), "Dart outline must include nullable Future<String?> method");
