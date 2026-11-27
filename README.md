@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.2/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.2/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 Send this to Antigravity:
 
 ```text
-Clone tag v1.9.2 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.9.3 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.9.2 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.9.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,10 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.9.3
+- **Catppuccin Mocha dark theme & zero-flash startup (thanks `@Ansg2022` in #8)**: Added a full Catppuccin Mocha dark theme to the Sidecar dashboard with automatic system-preference detection, left-click Light/Mocha toggle, right-click or `Shift+Click` / `Shift+Enter` reset back to system theme, and an inline `<script data-theme-init>` FOUC guard so dark mode loads with zero white flash.
+- **Card hierarchy polish & topbar section quick-jump**: Refined Sidecar card surfaces and borders for clear visual hierarchy, and added a sticky topbar section quick-jump pill bar with active scroll-spy tracking, bottom-pinning protection against accidental jumps, full narrow-sidebar wrapping (`300px–820px` verified in headless Edge), and `beforeunload` resource cleanup (`tests/dashboard-theme.test.mjs`).
 
 ### v1.9.2
 - **MCP Apps diagnostics card safety & UX hardening**: Fixed `ctx_stats` Refresh button to stay strictly read-only (`reset: false`, never replaying `reset: true`), wired `ctx_doctor` Safety Monitor alerts to display real `diagnosis` + `recommendedAction` text, enforced `event.source === window.parent`, strict host CSS variable allowlist + `background-color` (blocking `url(...)` / internal overrides), `ui/resource-teardown` cleanup, and strict SEP-1865 `mimeTypes` negotiation in `context/server.js`.

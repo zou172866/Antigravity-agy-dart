@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.2/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.2/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.3/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.9.2 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.9.3 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.9.2 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.9.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,10 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.9.3
+- **右侧面板新增 Catppuccin Mocha 暗黑主题与首屏防白闪（感谢 `@Ansg2022` 贡献 #8）**：支持默认跟随系统深浅色、左键在浅色与 Mocha 深色间一键切换、右键或 `Shift+Click` / `Shift+Enter` 恢复跟随系统，并加入首屏防白闪（FOUC）初始化脚本，打开即暗黑不刺眼。
+- **卡片层次打磨与顶栏锚点快跳**：优化了面板卡片层次与边框对比度，顶栏新增分节快速跳转胶囊条与滚动位置高亮追踪；补齐窄侧边栏（实测 `300px–820px`）零裁切折行、防底部抢跳与页面卸载清理（新增 `tests/dashboard-theme.test.mjs` 回归用例）。
 
 ### v1.9.2
 - **内联诊断卡片安全与体验加固**：修复 `ctx_stats` 卡片点击刷新时不再重放 `reset: true`（强制只读刷新，避免二次清空当前会话数据）；修复 `ctx_doctor` 卡片 Safety Monitor 告警显示真实 `diagnosis` 与处置建议；加固 `event.source === window.parent` 校验、宿主 CSS 变量白名单与 `background-color`（阻断 `url(...)` 与内部变量覆盖）、补齐 `ui/resource-teardown` 清理响应，并收严 `context/server.js` 的 SEP-1865 `mimeTypes` 协商。
