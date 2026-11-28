@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 Send this to Antigravity:
 
 ```text
-Clone tag v1.10.0 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.10.1 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.10.0 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.1 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,10 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.10.1
+- **Removed bundled custom agents (`#1890` 4× quota protection)**: Removed `agents/dart-coder.md` and `agents/dart-reviewer.md` (plus cleaned `package-manifest.json`, `package.json`, and `verify-package-graph.mjs`) so Antigravity `1.5.17+` sessions never accidentally trigger the 4× custom-agent quota multiplier; use the default main session or built-in `self` / `research` (1× standard quota) instead—all `agy-dart_fast` and `agy-dart_context` MCP tools work automatically.
+- **Custom-agent 4× quota audit in `scripts/cache-audit.mjs`**: Added `auditCustomAgents()` scanning workspace (`.agents/agents`, `.gemini/agents`, `.agent/agents`, `.agents/plugins/*/agents`) and global/plugin `agents/*.md` with `workspace` vs `global` scope tagging (`--workspace-only` aware); active custom agents emit `warn` (`custom_agent_quota_multiplier`), while frontmatter `DEPRECATED` transition placeholders downgrade to `info` (`deprecated_custom_agent_placeholder`).
 
 ### v1.10.0
 - **Faster hooks, LRU history cache & SQLite auto-compaction**: Split `watchdog-lease.js` into a zero-FS/zero-SQLite hot-path core (`watchdog-lease-core.js`) plus lazy `watchdog-transcript.js` and `watchdog-summaries.js` (upgraded to true O(1) LRU lookup cache); added SQLite freelist fragmentation diagnostics (`getStorageHealth`, surfaced in `ctx_doctor` & Sidecar), lossless **Compact DB** action (`vacuum_only`), threshold-gated idle auto-`VACUUM` (`>= 4 MiB` & `>= 25%` reclaimable, 24h cooldown), and raised idle Sidecar backend reload polling from 3s to 10s.
@@ -238,7 +242,7 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 
 ### v1.7.2
 - **Lighter built-in skill docs & a Skills bloat check**: Moved sample scripts and troubleshooting notes into on-demand files so they don't eat startup context when unused; added `node bin/agy-dart.mjs audit skills` to check how much startup context each installed Skill uses and spot oversized main files.
-- **Leaner output from built-in helper agents**: The built-in coding (`dart-coder`) and review (`dart-reviewer`) subagents stay lightweight without carrying extra external tools or global rules, and now route quick checks through output trimming instead of dumping long terminal logs into the chat.
+- **Leaner output from built-in helper agents** _(later removed to avoid Antigravity `1.5.17+` #1890 4× custom-agent quota; use the default main session or built-in `self` / `research`)_: The built-in coding (`dart-coder`) and review (`dart-reviewer`) subagents stay lightweight without carrying extra external tools or global rules, and now route quick checks through output trimming instead of dumping long terminal logs into the chat.
 
 ### v1.7.1
 - **Fixed the panel's "Blocked Noise" counter staying at 0**: Bytes saved by sliced file reads, batched searches, and trimmed check outputs are now counted accurately in the panel, without mixing up windows or double-counting.

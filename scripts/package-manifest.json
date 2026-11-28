@@ -9,8 +9,6 @@
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
     "assets/logo.svg",
-    "agents/dart-coder.md",
-    "agents/dart-reviewer.md",
     "rules/AGENTS.md",
     "skills/agy-dart/SKILL.md",
     "skills/agy-dart/references/error-playbook.md",
@@ -93,8 +91,6 @@
     "scripts/gen-review-brief.mjs"
   ],
   "runtimeAssets": [
-    "agents/dart-coder.md",
-    "agents/dart-reviewer.md",
     "dsh/plugin.mjs"
   ],
   "targetModules": [

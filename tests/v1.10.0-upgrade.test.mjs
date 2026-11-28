@@ -673,14 +673,14 @@ test("v1.10.0-W3.2: Dashboard VM verifies ResizeObserver cache reuse, 4 override
 // Wave 4: Prefix budget metadata accounting & cache-audit workspace scoping
 // ============================================================================
 
-test("v1.10.0-W4.1: prefix-budget accounts for live MCP instructions and agents/*.md discovery metadata", async () => {
+test("v1.10.0-W4.1: prefix-budget accounts for live MCP instructions and agents/*.md discovery metadata", async (t) => {
   const report = await auditPrefixBudget(ROOT);
   assert.equal(report.blocks.tools.canonical, true);
   assert.ok(report.blocks.mcpInstructions, "prefix-budget must include blocks.mcpInstructions");
   assert.ok(report.blocks.mcpInstructions.context.tokens > 0, "context MCP instructions must be measured live");
   assert.ok(report.blocks.agentMetadata, "prefix-budget must include blocks.agentMetadata");
-  assert.equal(report.blocks.agentMetadata.agentCount, 2);
-  assert.ok(report.blocks.agentMetadata.tokens > 0);
+  assert.equal(report.blocks.agentMetadata.agentCount, 0);
+  assert.equal(report.blocks.agentMetadata.tokens, 0);
   assert.equal(
     report.metadataTokens,
     report.blocks.mcpInstructions.tokens + report.blocks.agentMetadata.tokens
@@ -690,6 +690,30 @@ test("v1.10.0-W4.1: prefix-budget accounts for live MCP instructions and agents/
     report.configuredStartup.estimatedTokensWithMetadata,
     report.configuredStartup.estimatedTokens + report.metadataTokens
   );
+
+  // Fixture directory with agents/*.md verifies auditPrefixBudget still accurately counts agent discovery tokens
+  const fixtureRoot = makeTempDir("agy-v110-agent-meta-");
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  for (const dirName of ["context", "fast", "hooks", "rules", "skills", "scripts"]) {
+    fs.symlinkSync(path.join(ROOT, dirName), path.join(fixtureRoot, dirName), linkType);
+  }
+  fs.copyFileSync(path.join(ROOT, "mcp_config.json"), path.join(fixtureRoot, "mcp_config.json"));
+  fs.copyFileSync(path.join(ROOT, "package.json"), path.join(fixtureRoot, "package.json"));
+  fs.mkdirSync(path.join(fixtureRoot, "agents"), { recursive: true });
+  fs.writeFileSync(
+    path.join(fixtureRoot, "agents", "sample-auditor.md"),
+    "---\nname: sample-auditor\ndescription: Inspect sample discovery metadata token accounting.\n---\nBody\n",
+    "utf8"
+  );
+  const fixtureReport = await auditPrefixBudget(fixtureRoot);
+  assert.equal(fixtureReport.blocks.agentMetadata.agentCount, 1);
+  assert.ok(fixtureReport.blocks.agentMetadata.tokens > 0);
+  assert.equal(
+    fixtureReport.metadataTokens,
+    fixtureReport.blocks.mcpInstructions.tokens + fixtureReport.blocks.agentMetadata.tokens
+  );
+  assert.ok(fixtureReport.totalTokensWithMetadata > fixtureReport.totalTokens);
 });
 
 test("v1.10.0-W4.2: cache-audit tags workspace vs global findings and supports --workspace-only", async (t) => {

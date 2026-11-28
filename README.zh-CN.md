@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.0 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.1 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.10.0 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.1 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,10 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.10.1
+- **移除内置自定义 Agent（规避 `#1890` 4× 配额扣费）**：已移除 `agents/dart-coder.md` 与 `agents/dart-reviewer.md`（同步清理 `package-manifest.json`、`package.json` 与 `verify-package-graph.mjs`），防止在 Antigravity `1.5.17+` 中误触发自定义 Agent 的 4× 配额倍率；推荐直接使用默认主会话或官方内置 `self` / `research`（1× 原价），全部 `agy-dart_fast` 与 `agy-dart_context` 工具照常生效。
+- **`scripts/cache-audit.mjs` 新增 `#1890` 自定义 Agent 体检**：自动扫描工作区（`.agents/agents`、`.gemini/agents`、`.agent/agents`、`.agents/plugins/*/agents`）与全局/已启用插件的 `agents/*.md` 并标注 `workspace` / `global` 归属（支持 `--workspace-only`）；活跃自定义 Agent 触发 `warn`（`custom_agent_quota_multiplier`），frontmatter 标为 `DEPRECATED` 的过渡占位文件降级为 `info`（`deprecated_custom_agent_placeholder`）。
 
 ### v1.10.0
 - **钩子更轻快、历史查询真 LRU 与本地库自动瘦身**：将 `watchdog-lease.js` 拆分为零磁盘/零 SQLite 的热路径核心（`watchdog-lease-core.js`）及按需加载的 `watchdog-transcript.js`、`watchdog-summaries.js`（升级 O(1) 真 LRU 缓存）；新增 SQLite 空洞碎片诊断（`getStorageHealth`，同步展示在 `ctx_doctor` 与右侧面板）、面板一键「**无损压缩库**」（不删记录仅回收空洞页）以及空闲自动瘦身（可回收 `>= 4 MB` 且占比 `>= 25%` 才触发，24 小时冷却）；Sidecar 后台空闲变更轮询由 3 秒放宽至 10 秒。
@@ -238,7 +242,7 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 
 ### v1.7.2
 - **给插件自带说明「瘦身」，新增 Skills 体检命令**：把示例脚本和排错手册拆成用到再读，平时不白占开场上下文；新增 `node bin/agy-dart.mjs audit skills`，一键查出本机所有已装 Skill 各自占了多少开场额度、有没有把大段资料全塞进主说明里。
-- **自带的两个轻量子助手更省输出**：内置的改代码助手（`dart-coder`）和审查助手（`dart-reviewer`）继续保持轻装上阵（不额外背一堆工具和全局规则），现在跑快速检查也会自动精简输出，减少把超长日志直接倒进对话。
+- **自带的两个轻量子助手更省输出** _（后续为规避 Antigravity `1.5.17+` #1890 的 4× 自定义 Agent 配额扣费已移除，推荐改用默认主会话或内置 `self` / `research`）_：内置的改代码助手（`dart-coder`）和审查助手（`dart-reviewer`）继续保持轻装上阵（不额外背一堆工具和全局规则），现在跑快速检查也会自动精简输出，减少把超长日志直接倒进对话。
 
 ### v1.7.1
 - **修好面板「已挡废话」一直显示 0 的问题**：以前按段读代码、批量搜代码、精简检查输出省下来的字数没记进面板，现在按实际省下的大小如实统计，多开窗口也不会算串或重复计数。

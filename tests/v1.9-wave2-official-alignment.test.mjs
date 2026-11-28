@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { auditEnvironmentCache } from "../scripts/cache-audit.mjs";
+import { auditEnvironmentCache, formatCacheAuditMarkdown } from "../scripts/cache-audit.mjs";
 import { buildMcpConfigObject } from "../scripts/install.mjs";
 import { ContextModeStore } from "../context/lib/store.js";
 import { evaluateCacheAlerts } from "../hooks/pre-invocation.mjs";
@@ -231,20 +231,156 @@ test("Wave2-1 (P0-4): cache-audit discovers .agents/ & .antigravity-plugin, eval
   }
 });
 
-test("Wave2-2 (P1-1): built-in subagents declare eager fast tools and check root AGENTS.md", () => {
-  for (const [name, expectedTools] of [
-    ["dart-coder", ["batch_search", "read_slices", "apply_edits", "run_checks"]],
-    ["dart-reviewer", ["batch_search", "read_slices", "run_checks"]]
-  ]) {
-    const src = fs.readFileSync(path.join(ROOT, "agents", `${name}.md`), "utf8");
-    for (const tool of expectedTools) {
-      assert.match(
-        src,
-        new RegExp(`${tool}:\\s*\\{\\s*eager:\\s*true\\s*\\}`),
-        `${name} must mark ${tool} eager: true`
-      );
-    }
-    assert.match(src, /AGENTS\.md/, `${name} must remind subagent to check root AGENTS.md`);
+test("Wave2-2 (#1890): agy-dart removes custom agents and cache-audit flags custom/plugin agents with workspace scoping & DEPRECATED downgrade", async () => {
+  assert.equal(fs.existsSync(path.join(ROOT, "agents", "dart-coder.md")), false);
+  assert.equal(fs.existsSync(path.join(ROOT, "agents", "dart-reviewer.md")), false);
+
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w2-agents-1890-"));
+  try {
+    const fakeHome = path.join(baseDir, "home");
+    const configDir = path.join(fakeHome, ".gemini", "config");
+    const repoRoot = path.join(baseDir, "repo");
+    const workspaceDir = path.join(repoRoot, "packages", "app");
+    fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+    fs.mkdirSync(workspaceDir, { recursive: true });
+
+    // 1. Workspace active custom agents (.agents/agents, .agent/agents legacy, workspace plugin)
+    fs.mkdirSync(path.join(workspaceDir, ".agents", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDir, ".agents", "agents", "local-coder.md"),
+      "---\nname: local-coder\ndescription: Custom workspace coder\n---\nBody mentions DEPRECATED but frontmatter does not.\n",
+      "utf8"
+    );
+    fs.mkdirSync(path.join(workspaceDir, ".agent", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDir, ".agent", "agents", "legacy-reviewer.md"),
+      "---\nname: legacy-reviewer\ndescription: deprecated lowercase should still warn\n---\nBody\n",
+      "utf8"
+    );
+    fs.mkdirSync(path.join(workspaceDir, ".agents", "plugins", "ws-plug", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDir, ".agents", "plugins", "ws-plug", "plugin.json"),
+      JSON.stringify({ name: "ws-plug", version: "1.0.0" }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(workspaceDir, ".agents", "plugins", "ws-plug", "agents", "ws-helper.md"),
+      "---\nname: ws-helper\ndescription: Workspace plugin helper\n---\nBody\n",
+      "utf8"
+    );
+
+    // 2. Global standalone & global plugin agents (one active, one DEPRECATED placeholder)
+    fs.mkdirSync(path.join(configDir, "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "agents", "global-bot.md"),
+      "---\nname: global-bot\ndescription: Global standalone custom agent\n---\nBody\n",
+      "utf8"
+    );
+    fs.mkdirSync(path.join(fakeHome, ".agents", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(fakeHome, ".agents", "agents", "home-bot.md"),
+      "---\nname: home-bot\ndescription: Home .agents custom agent\n---\nBody\n",
+      "utf8"
+    );
+    fs.mkdirSync(path.join(configDir, "plugins", "third-party", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "plugins", "third-party", "plugin.json"),
+      JSON.stringify({ name: "third-party", version: "1.0.0" }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(configDir, "plugins", "third-party", "agents", "rules-author.md"),
+      "---\nname: rules-author\ndescription: Third-party plugin agent\n---\nBody\n",
+      "utf8"
+    );
+    fs.mkdirSync(path.join(configDir, "plugins", "agy-cmd", "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "plugins", "agy-cmd", "plugin.json"),
+      JSON.stringify({ name: "agy-cmd", version: "2.8.1" }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(configDir, "plugins", "agy-cmd", "agents", "cmd-verifier.md"),
+      "---\nname: cmd-verifier\ndescription: DEPRECATED - do not invoke (4x custom-agent quota since agy 1.5.17, issue 1890). Use built-in research instead.\n---\nPlaceholder\n",
+      "utf8"
+    );
+
+    // Full audit sees both workspace and global/plugin findings with exact target prefixes
+    const full = await auditEnvironmentCache({ workspace: workspaceDir, configDir, live: false });
+    assert.equal(full.customAgents.agentCount, 7);
+    assert.equal(full.customAgents.activeCount, 6);
+    assert.equal(full.customAgents.deprecatedCount, 1);
+
+    const wsWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "workspace:.agents/agents/local-coder.md"
+    );
+    assert.ok(wsWarn, "Workspace .agents/agents/* with DEPRECATED only in body must emit warn");
+    assert.equal(wsWarn.severity, "warn");
+    assert.equal(wsWarn.scopeGroup, "workspace");
+
+    const legacyWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "workspace-legacy:.agent/agents/legacy-reviewer.md"
+    );
+    assert.ok(legacyWarn, "Lowercase 'deprecated' in description must still emit warn (case-sensitive check)");
+    assert.equal(legacyWarn.scopeGroup, "workspace");
+
+    const wsPlugWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "workspace-plugin:ws-plug/agents/ws-helper.md"
+    );
+    assert.ok(wsPlugWarn, "Workspace plugin agent must emit warn with workspace-plugin: target");
+    assert.equal(wsPlugWarn.scopeGroup, "workspace");
+
+    const globalWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "global:agents/global-bot.md"
+    );
+    assert.ok(globalWarn, "Global configDir agent must emit warn with global: target");
+    assert.equal(globalWarn.scopeGroup, "global");
+
+    const homeAgentsWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "global:.agents/agents/home-bot.md"
+    );
+    assert.ok(homeAgentsWarn, "Global ~/.agents/agents/* must emit warn with global: target");
+    assert.equal(homeAgentsWarn.scopeGroup, "global");
+
+    const pluginWarn = full.findings.find(
+      (f) => f.code === "custom_agent_quota_multiplier" && f.target === "plugin:third-party/agents/rules-author.md"
+    );
+    assert.ok(pluginWarn, "Active global plugin agent must emit warn with plugin: target");
+    assert.equal(pluginWarn.scopeGroup, "global");
+
+    const depInfo = full.findings.find(
+      (f) =>
+        f.code === "deprecated_custom_agent_placeholder" &&
+        f.target === "plugin:agy-cmd/agents/cmd-verifier.md"
+    );
+    assert.ok(depInfo, "Frontmatter description starting with DEPRECATED must downgrade to info");
+    assert.equal(depInfo.severity, "info");
+    assert.equal(depInfo.scopeGroup, "global");
+
+    const md = formatCacheAuditMarkdown(full);
+    assert.ok(md.includes("Custom Agents (Issue #1890"), "Markdown report must include custom agents summary");
+    assert.ok(md.includes("custom_agent_quota_multiplier"));
+    assert.ok(md.includes("deprecated_custom_agent_placeholder"));
+
+    // --workspace-only filters out all global & global-plugin custom agents while retaining workspace ones
+    const wsOnly = await auditEnvironmentCache({
+      workspace: workspaceDir,
+      configDir,
+      live: false,
+      workspaceOnly: true
+    });
+    assert.equal(wsOnly.customAgents.agentCount, 3);
+    assert.equal(wsOnly.findingsByScope.global, 0);
+    assert.ok(
+      wsOnly.findings.every((f) => f.scopeGroup === "workspace"),
+      "workspaceOnly must exclude all global/plugin custom agent findings"
+    );
+    assert.ok(
+      wsOnly.findings.some((f) => f.target === "workspace:.agents/agents/local-coder.md"),
+      "workspaceOnly must retain workspace custom agent findings"
+    );
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 

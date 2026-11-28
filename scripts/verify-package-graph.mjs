@@ -1200,7 +1200,7 @@ export function verifyPackageManifest(rootDir = REPO_ROOT) {
   let manifestSchemaVersion = null;
   let runtimeFiles = [...RUNTIME_FILES];
   let devtoolsFiles = [...DEVTOOLS_FILES];
-  let runtimeAssets = ["agents/dart-coder.md", "agents/dart-reviewer.md", "dsh/plugin.mjs"];
+  let runtimeAssets = ["dsh/plugin.mjs"];
   let targetModules = ["shared", "antigravity", "claude-code", "codex", "dsh", "index"].map(
     (name) => "scripts/targets/" + name + ".mjs"
   );

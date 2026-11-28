@@ -33,19 +33,19 @@ trap cleanup EXIT INT TERM
 REPO_DIR="$TMP_DIR/repo"
 if command -v git >/dev/null 2>&1; then
   echo "[agy-dart] Fetching latest release from GitHub..."
-  git clone --depth 1 --branch v1.10.0 --quiet "https://github.com/zou172866/Antigravity-agy-dart.git" "$REPO_DIR"
+  git clone --depth 1 --branch v1.10.1 --quiet "https://github.com/zou172866/Antigravity-agy-dart.git" "$REPO_DIR"
 elif command -v curl >/dev/null 2>&1; then
   echo "[agy-dart] Downloading archive from GitHub..."
   mkdir -p "$REPO_DIR"
-  curl -fsSL "https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.0.tar.gz" | tar -xz --strip-components=1 -C "$REPO_DIR"
+  curl -fsSL "https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.1.tar.gz" | tar -xz --strip-components=1 -C "$REPO_DIR"
 elif command -v wget >/dev/null 2>&1; then
   echo "[agy-dart] Downloading archive from GitHub..."
   mkdir -p "$REPO_DIR"
-  wget -qO- "https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.0.tar.gz" | tar -xz --strip-components=1 -C "$REPO_DIR"
+  wget -qO- "https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.1.tar.gz" | tar -xz --strip-components=1 -C "$REPO_DIR"
 elif command -v tar >/dev/null 2>&1; then
   echo "[agy-dart] Downloading archive from GitHub via Node.js..."
   mkdir -p "$REPO_DIR"
-  node -e 'fetch("https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.0.tar.gz").then(r=>{if(!r.ok)process.exit(1);return r.arrayBuffer()}).then(b=>process.stdout.write(Buffer.from(b))).catch(()=>process.exit(1))' | tar -xz --strip-components=1 -C "$REPO_DIR"
+  node -e 'fetch("https://github.com/zou172866/Antigravity-agy-dart/archive/refs/tags/v1.10.1.tar.gz").then(r=>{if(!r.ok)process.exit(1);return r.arrayBuffer()}).then(b=>process.stdout.write(Buffer.from(b))).catch(()=>process.exit(1))' | tar -xz --strip-components=1 -C "$REPO_DIR"
 else
   echo "Error: git, curl, wget, or tar is required for remote installation." >&2
   exit 1

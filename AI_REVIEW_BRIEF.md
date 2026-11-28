@@ -1,11 +1,11 @@
 # `agy-dart` — AI 审阅技术简报（AI Review Brief）
 
 <!-- AUTO:INTRO:START -->
-> **本文档用途**：面向代码审阅 AI / 架构审计 AI / 安全审查 AI 的高密度项目总览与审阅路线图。对应当前版本 `v1.10.0`。代码行数、模块映射与测试数量由 `scripts/gen-review-brief.mjs` 自动同步并受 `--check` 漂移守卫保护。
+> **本文档用途**：面向代码审阅 AI / 架构审计 AI / 安全审查 AI 的高密度项目总览与审阅路线图。对应当前版本 `v1.10.1`。代码行数、模块映射与测试数量由 `scripts/gen-review-brief.mjs` 自动同步并受 `--check` 漂移守卫保护。
 <!-- AUTO:INTRO:END -->
 
 <!-- AUTO:META:START -->
-> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.0` · 核心追踪文件 70 个（合计 87,896 行） · 测试套件 59 个 / 411 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
+> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.1` · 核心追踪文件 70 个（合计 88,116 行） · 测试套件 59 个 / 411 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
 <!-- AUTO:META:END -->
 
 ---
@@ -162,7 +162,7 @@ flowchart TB
 | `context/ui/diagnostics.html` | 844 | 零依赖单文件 SEP-1865 MCP App 内联诊断卡片：自动跟随宿主主题与 CSS 变量，可视化渲染 `ctx_stats` 节省率/Feature ROI 与 `ctx_doctor` 运行健康状态 |
 | `dsh/plugin.mjs` | 141 | DSH 原生工具桥接插件：透明挂接 pre/execute/result 钩子，失败/取消读自动失效待定缓存并保持 fail-open |
 | `bin/agy-dart.mjs` | 56 | 统一 CLI 入口（devtools）：派发 install/doctor/benchmark/cache-audit/prefix-budget/outline |
-| `scripts/cache-audit.mjs` | 4,042 | 全域环境 Prompt Cache 体检 `npm run cache:audit`（devtools）：规则/技能 CJK 估 token、双次握手探测 MCP 确定性、静态分析中段 Hook、`workspace`/`global` 归属统计与 `--workspace-only` 单仓过滤 |
+| `scripts/cache-audit.mjs` | 4,262 | 全域环境 Prompt Cache 体检 `npm run cache:audit`（devtools）：规则/技能 CJK 估 token、双次握手探测 MCP 确定性、静态分析中段 Hook、`workspace`/`global` 归属统计与 `--workspace-only` 单仓过滤 |
 | `scripts/install.mjs` | 1,558 | 跨平台安装/卸载/模式切换/`doctor` 健康自检：消费 `scripts/package-manifest.json` 导出 `RUNTIME_FILES`（默认）与 `DEVTOOLS_FILES`（`--with-devtools`），校验 5 大 Hook 与 Watchdog 并输出生效配置 |
 | `scripts/targets/index.mjs` | 281 | 多宿主安装/卸载/`doctor` 路由器与并发安全安装互斥锁（token + 新建宽限窗口 + `.reclaim` 失效锁回收） |
 | `scripts/targets/shared.mjs` | 300 | 多宿主共享运行时同步、托管文件哈希、退役清理与安装收据管理 |

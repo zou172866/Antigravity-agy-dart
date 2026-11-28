@@ -1,6 +1,6 @@
 {
   "name": "agy-dart",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "type": "module",
   "description": "All-in-one Antigravity plugin uniting agy-fast latency batching, transparent CLI output filtering, KV-cache diagnostics, SQLite FTS5 context-window protection, and a live Sidecar dashboard with Stall Watchdog.",
   "license": "MIT",
@@ -51,7 +51,6 @@
   },
   "files": [
     "bin/",
-    "agents/",
     "assets/",
     "context/",
     "dsh/",

@@ -3428,6 +3428,207 @@ function auditHooksAndPlugins(configDir, workspaceDir, activePlugins, disabledPl
   };
 }
 
+function parseAgentFrontmatterMeta(markdown) {
+  const raw = String(markdown || "");
+  const normalized = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const match = normalized.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/);
+  if (!match) {
+    return { hasFrontmatter: false, name: "", description: "" };
+  }
+  const lines = match[1].replace(/\r\n/g, "\n").split("\n");
+  let name = "";
+  let description = "";
+  const parseScalar = (rawVal) => {
+    const trimmed = String(rawVal || "").trim();
+    if (!trimmed) return "";
+    if (trimmed[0] === '"' || trimmed[0] === "'") {
+      const q = trimmed[0];
+      const res = scanQuotedScalar(trimmed, 1, q);
+      if (res.closed) {
+        const inner = trimmed.slice(1, res.endIdx - 1);
+        return q === "'" ? inner.replace(/''/g, "'").trim() : inner.trim();
+      }
+      return trimmed.slice(1).trim();
+    }
+    return stripPlainInlineComment(trimmed).trim();
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^[ \t]/.test(line)) continue;
+    const nameMatch = line.match(/^name[ \t]*:[ \t]*(.*)$/);
+    if (nameMatch) {
+      name = parseScalar(nameMatch[1]);
+      continue;
+    }
+    const descMatch = line.match(/^description[ \t]*:[ \t]*(.*)$/);
+    if (descMatch) {
+      const rest = descMatch[1].trim();
+      if (BLOCK_SCALAR_HEADER_RE.test(rest)) {
+        const block = [];
+        for (let j = i + 1; j < lines.length; j++) {
+          if (/^[ \t]+/.test(lines[j])) {
+            block.push(lines[j].trim());
+            i = j;
+          } else if (lines[j].trim() === "") {
+            i = j;
+          } else {
+            break;
+          }
+        }
+        description = block.join(" ").trim();
+      } else {
+        description = parseScalar(rest);
+      }
+    }
+  }
+  return { hasFrontmatter: true, name, description };
+}
+
+function auditCustomAgents(configDir, workspaceDir, activePlugins, findings, { workspaceOnly = false } = {}) {
+  const seen = new Set();
+  const items = [];
+  let activeCount = 0;
+  let deprecatedCount = 0;
+
+  const addAgentFile = (filePath, scope, target, pluginName = null) => {
+    if (!isFile(filePath)) return;
+    const key = canonicalPathKey(filePath);
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    let text;
+    try {
+      text = fs.readFileSync(filePath, "utf8");
+    } catch {
+      return;
+    }
+    const meta = parseAgentFrontmatterMeta(text);
+    const agentName = meta.name || path.basename(filePath, path.extname(filePath));
+    const description = meta.description || "";
+    const deprecated = description.trim().startsWith("DEPRECATED");
+
+    items.push({
+      name: agentName,
+      description,
+      deprecated,
+      scope,
+      target,
+      path: path.resolve(filePath),
+      ...(pluginName ? { plugin: pluginName } : {})
+    });
+
+    if (deprecated) {
+      deprecatedCount += 1;
+      findings.push({
+        severity: "info",
+        category: "agents",
+        code: "deprecated_custom_agent_placeholder",
+        target,
+        message: `Custom agent '${agentName}' is a DEPRECATED compatibility placeholder retained for self-update safety (still visible in host discovery; Antigravity 1.5.17+ charges ~4x quota for custom/plugin agents, #1890).`,
+        recommendation: `Keep '${agentName}' uninvoked (use default Agent or built-in 'research' / 'self' at 1x quota) and remove it once the plugin's deprecation window completes.`
+      });
+    } else {
+      activeCount += 1;
+      findings.push({
+        severity: "warn",
+        category: "agents",
+        code: "custom_agent_quota_multiplier",
+        target,
+        message: `Active custom/plugin agent '${agentName}' detected. Since Antigravity 1.5.17+ (#1890), custom and plugin agents (and their subagents) incur ~4x quota consumption compared to default or built-in agents.`,
+        recommendation: `Move instructions to AGENTS.md / GEMINI.md or SKILL.md and switch to the default Agent or built-in 'self' / 'research' (1x standard quota) instead of '${agentName}'.`
+      });
+    }
+  };
+
+  // 1. Workspace custom agents & workspace plugins (walk up to repo .git root)
+  const resolvedWorkspace = path.resolve(workspaceDir);
+  const ancestorDirs = listWorkspaceAncestorDirs(workspaceDir);
+  const formatWorkspaceRel = (filePath, dir) =>
+    normalizePathKey(dir) === normalizePathKey(resolvedWorkspace)
+      ? toPosixDisplay(filePath, resolvedWorkspace)
+      : path.relative(resolvedWorkspace, filePath).replace(/\\/g, "/");
+
+  for (const dir of ancestorDirs) {
+    for (const f of listMarkdownFiles(path.join(dir, ".agents", "agents"), 2)) {
+      addAgentFile(f, "workspace", `workspace:${formatWorkspaceRel(f, dir)}`);
+    }
+    for (const f of listMarkdownFiles(path.join(dir, ".gemini", "agents"), 2)) {
+      addAgentFile(f, "workspace", `workspace:${formatWorkspaceRel(f, dir)}`);
+    }
+    for (const f of listMarkdownFiles(path.join(dir, ".agent", "agents"), 2)) {
+      addAgentFile(f, "workspace-legacy", `workspace-legacy:${formatWorkspaceRel(f, dir)}`);
+    }
+    const wsPluginsRoot = path.join(dir, ".agents", "plugins");
+    if (isDir(wsPluginsRoot)) {
+      let entries = [];
+      try {
+        entries = fs.readdirSync(wsPluginsRoot, { withFileTypes: true });
+      } catch {}
+      entries.sort((a, b) => compareAscii(a.name, b.name));
+      for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
+        const pDir = path.join(wsPluginsRoot, ent.name);
+        let pluginName = ent.name;
+        for (const mfPath of [
+          path.join(pDir, ".antigravity-plugin", "plugin.json"),
+          path.join(pDir, ".gemini-plugin", "plugin.json"),
+          path.join(pDir, "plugin.json")
+        ]) {
+          if (isFile(mfPath)) {
+            const mf = safeReadJson(mfPath);
+            if (mf.ok && typeof mf.data?.name === "string" && mf.data.name.trim()) {
+              pluginName = mf.data.name.trim();
+            }
+            break;
+          }
+        }
+        for (const f of listMarkdownFiles(path.join(pDir, "agents"), 2)) {
+          const rel = toPosixDisplay(f, pDir);
+          addAgentFile(f, `workspace-plugin:${pluginName}`, `workspace-plugin:${pluginName}/${rel}`, pluginName);
+        }
+      }
+    }
+  }
+
+  // 2. Active plugins (global & workspace plugins already scoped by discoverPlugins)
+  for (const plugin of activePlugins) {
+    const isWorkspacePlugin = plugin.scope.startsWith("workspace-plugin:");
+    if (workspaceOnly && !isWorkspacePlugin) continue;
+    const prefix = isWorkspacePlugin ? "workspace-plugin" : "plugin";
+    for (const f of listMarkdownFiles(path.join(plugin.dir, "agents"), 2)) {
+      const rel = toPosixDisplay(f, plugin.dir);
+      addAgentFile(f, plugin.scope, `${prefix}:${plugin.name}/${rel}`, plugin.name);
+    }
+  }
+
+  // 3. Global standalone custom agents (~/.gemini/config/agents/*.md & ~/.agents/agents/*.md)
+  if (!workspaceOnly) {
+    for (const f of listMarkdownFiles(path.join(configDir, "agents"), 2)) {
+      const rel = toPosixDisplay(f, configDir);
+      addAgentFile(f, "global", `global:${rel}`);
+    }
+    const resolvedCfg = path.resolve(configDir);
+    const cfgBase = path.basename(resolvedCfg).toLowerCase();
+    const cfgParent = path.dirname(resolvedCfg);
+    if (cfgBase === "config" && path.basename(cfgParent).toLowerCase() === ".gemini") {
+      const homeRoot = path.dirname(cfgParent);
+      for (const f of listMarkdownFiles(path.join(homeRoot, ".agents", "agents"), 2)) {
+        const rel = toPosixDisplay(f, homeRoot);
+        addAgentFile(f, "global", `global:${rel}`);
+      }
+    }
+  }
+
+  items.sort((a, b) => compareAscii(a.target, b.target) || compareAscii(a.path, b.path));
+
+  return {
+    agentCount: items.length,
+    activeCount,
+    deprecatedCount,
+    items
+  };
+}
+
 /* ============================================================================
  * Check 4: Deterministic Health Score & Markdown Report
  * ========================================================================== */
@@ -3701,6 +3902,7 @@ export async function auditEnvironmentCache(options = {}) {
   const prefix = auditTurn0Prefix(configDir, workspace, activePlugins, findings, { workspaceOnly });
   const mcp = await auditMcpServers(configDir, workspace, activePlugins, { live, timeoutMs, workspaceOnly }, findings);
   const hooks = auditHooksAndPlugins(configDir, workspace, activePlugins, disabledPlugins, findings, { workspaceOnly });
+  const customAgents = auditCustomAgents(configDir, workspace, activePlugins, findings, { workspaceOnly });
   let safety = null;
   if (includeSafety) {
     safety = auditSafetyMonitorOnly(options);
@@ -3758,6 +3960,7 @@ export async function auditEnvironmentCache(options = {}) {
     prefix,
     mcp,
     hooks,
+    customAgents,
     ...(includeSafety ? { safety } : {}),
     findings: sortedFindings
   });
@@ -3856,6 +4059,23 @@ export function formatCacheAuditMarkdown(report) {
       lines.push(
         `| \`${mdCell(h.scope)}\` | ${mdCell(h.event)} | ${matcherDisp} | ${mdCell(statusDisp)} | \`${mdCell(h.command)}\` |`
       );
+    }
+    lines.push("");
+  }
+
+  if (report.customAgents) {
+    const ca = report.customAgents;
+    lines.push(
+      `- **Custom Agents (Issue #1890 · ~4x quota risk)**: ${ca.activeCount} active, ${ca.deprecatedCount} deprecated placeholder(s)`
+    );
+    if (Array.isArray(ca.items) && ca.items.length > 0) {
+      lines.push("");
+      lines.push("| Scope | Agent | Status | Target |");
+      lines.push("| :--- | :--- | :--- | :--- |");
+      for (const a of ca.items) {
+        const statusDisp = a.deprecated ? "DEPRECATED placeholder (info)" : "active (~4x quota warn)";
+        lines.push(`| \`${mdCell(a.scope)}\` | \`${mdCell(a.name)}\` | ${statusDisp} | \`${mdCell(a.target)}\` |`);
+      }
     }
     lines.push("");
   }
