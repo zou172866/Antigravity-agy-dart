@@ -1227,6 +1227,39 @@ export class SettingsMaintenanceMethods {
       .run(key, String(value));
   }
 
+  /** Record a recent keepalive cold-miss circuit-breaker trip for a model profile (#1665/#1720) */
+  recordKeepaliveColdTrip(profileId, atMs = Date.now()) {
+    if (typeof profileId !== "string" || !/^[a-z0-9._-]{1,64}$/i.test(profileId)) {
+      return;
+    }
+    const ts = Number(atMs);
+    if (!Number.isFinite(ts) || ts <= 0) {
+      return;
+    }
+    this.setMeta(`keepalive_cold_trip:${profileId}`, String(Math.floor(ts)));
+  }
+
+  /** Return timestamp (ms) of a recent keepalive cold trip within windowMs, or null */
+  getRecentKeepaliveColdTrip(profileId, nowMs = Date.now(), windowMs = 15 * 60 * 1000) {
+    if (typeof profileId !== "string" || !/^[a-z0-9._-]{1,64}$/i.test(profileId)) {
+      return null;
+    }
+    const now = Number(nowMs);
+    const win = Number(windowMs);
+    if (!Number.isFinite(now) || now <= 0 || !Number.isFinite(win) || win < 0) {
+      return null;
+    }
+    const raw = this.getMeta(`keepalive_cold_trip:${profileId}`, null);
+    if (raw === null || raw === undefined || raw === "") {
+      return null;
+    }
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0 || v > now) {
+      return null;
+    }
+    return now - v <= win ? v : null;
+  }
+
   /** Delete a key from meta table */
   deleteMeta(key) {
     this.open();

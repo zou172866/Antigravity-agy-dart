@@ -4670,6 +4670,11 @@
         if (savingsEl) { savingsEl.classList.add('hidden'); savingsEl.title = ''; }
         if (loopBadgeEl) loopBadgeEl.classList.add('hidden');
         if (loopRowEl) loopRowEl.classList.add('hidden');
+        const shortGapRowElEmpty = document.getElementById('kv-short-gap-row');
+        if (shortGapRowElEmpty) {
+          shortGapRowElEmpty.classList.add('hidden');
+          shortGapRowElEmpty.innerHTML = '';
+        }
         if (turnsRowEl) turnsRowEl.classList.add('hidden');
         if (deltasRowEl) deltasRowEl.classList.add('hidden');
         if (causesEl) causesEl.innerHTML = `<span class="muted-note">${escapeHtml(t('noTranscriptUsage'))}</span>`;
@@ -5028,6 +5033,22 @@
           kv.cacheCreationTokensTotal ? `<span title="${escapeHtml(t('bustWritesTip', { mult: writeMult.toFixed(2) }))}">${escapeHtml(t('bustWrites'))} <strong>${Math.round(kv.cacheCreationTokensTotal / 1000)}k</strong></span>` : '',
           kv.thinkingTokensTotal ? `<span title="${escapeHtml(t('bustThinkTip'))}">${escapeHtml(t('bustThink'))} <strong>${Math.round(kv.thinkingTokensTotal / 1000)}k</strong></span>` : ''
         ].filter(Boolean).join('');
+      }
+      const shortGapRowEl = document.getElementById('kv-short-gap-row');
+      if (shortGapRowEl) {
+        const sg = kv.shortGapColdSummary && typeof kv.shortGapColdSummary === 'object' ? kv.shortGapColdSummary : null;
+        const sgCountRaw = sg ? Number(sg.count) : 0;
+        const sgCount = Number.isFinite(sgCountRaw) && sgCountRaw > 0 ? Math.floor(sgCountRaw) : 0;
+        if (sgCount > 0) {
+          const sgMinRaw = Number(sg.minGapSec);
+          const sgMin = Number.isFinite(sgMinRaw) && sgMinRaw >= 0 ? Math.round(sgMinRaw) : 0;
+          const sgKey = sg.attribution === 'server_cliff_likely' ? 'shortGapColdCliff' : 'shortGapColdUnknown';
+          shortGapRowEl.innerHTML = `<span>${escapeHtml(t(sgKey, { count: sgCount, minGap: sgMin }))}</span>`;
+          shortGapRowEl.classList.remove('hidden');
+        } else {
+          shortGapRowEl.classList.add('hidden');
+          shortGapRowEl.innerHTML = '';
+        }
       }
       if (handoffDrawerOpen) {
         renderHandoffWarmthHint();
@@ -6852,9 +6873,17 @@
                 minRem: fmtSec(ka.effectiveMinRemainSec ?? ka.minRemainSec ?? 15)
               })}`
             : '';
+        const cliffSkipObj = ka?.shortCliffSkip && typeof ka.shortCliffSkip === 'object' ? ka.shortCliffSkip : null;
+        const cliffCntRaw = cliffSkipObj ? Number(cliffSkipObj.count) : 0;
+        const cliffCnt = Number.isFinite(cliffCntRaw) && cliffCntRaw >= 0 ? Math.floor(cliffCntRaw) : 0;
+        const cliffMinRaw = cliffSkipObj ? Number(cliffSkipObj.minGapSec) : 0;
+        const cliffMin = Number.isFinite(cliffMinRaw) && cliffMinRaw >= 0 ? Math.round(cliffMinRaw) : 0;
+        const cliffNote = cliffSkipObj
+          ? ` — ${t('ttlShortCliffSkippedBadge')} (${t('ttlShortCliffSkippedTip', { count: cliffCnt, minGap: cliffMin })})`
+          : '';
         btn.title = errText
-          ? `${baseTip}${coldNote}${narrowNote}${minGateNote} (⚠️ ${errText})`
-          : `${baseTip}${coldNote}${narrowNote}${minGateNote}`;
+          ? `${baseTip}${coldNote}${narrowNote}${cliffNote}${minGateNote} (⚠️ ${errText})`
+          : `${baseTip}${coldNote}${narrowNote}${cliffNote}${minGateNote}`;
       }
       if (maxInput) {
         maxInput.disabled = isSubagent;
@@ -7118,7 +7147,16 @@
           : 15;
 
       if (skipBadge) {
-        if (ka?.narrowMarginSkipped === true && !st.turnActive && snap.remainingSec > 0) {
+        const cliffSkip = ka?.shortCliffSkip && typeof ka.shortCliffSkip === 'object' ? ka.shortCliffSkip : null;
+        if (cliffSkip && !st.turnActive) {
+          const cliffCntRaw = Number(cliffSkip.count);
+          const cliffCnt = Number.isFinite(cliffCntRaw) && cliffCntRaw >= 0 ? Math.floor(cliffCntRaw) : 0;
+          const cliffMinRaw = Number(cliffSkip.minGapSec);
+          const cliffMin = Number.isFinite(cliffMinRaw) && cliffMinRaw >= 0 ? Math.round(cliffMinRaw) : 0;
+          skipBadge.className = 'meta-tag is-warn';
+          skipBadge.textContent = t('ttlShortCliffSkippedBadge');
+          skipBadge.title = t('ttlShortCliffSkippedTip', { count: cliffCnt, minGap: cliffMin });
+        } else if (ka?.narrowMarginSkipped === true && !st.turnActive && snap.remainingSec > 0) {
           skipBadge.className = 'meta-tag is-warn';
           skipBadge.textContent = t('ttlAutoSkippedBadge');
           skipBadge.title = t('ttlAutoSkippedTip', { minRem: fmtSec(effMinRem) });

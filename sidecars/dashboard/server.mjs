@@ -8,6 +8,7 @@ import { execFile, execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { VERSION_ROUTE, readLocalVersion } from "./version-check.mjs";
 import { UPDATE_MARKER_NAME, UPDATE_ROUTE, hasActiveUpdateMarker } from "./version-update.mjs";
+import { createHostLivenessGuard } from "./host-liveness.mjs";
 import {
   isAllowedHostHeader,
   isAllowedOriginHeader,
@@ -74,6 +75,7 @@ import {
   CONTEXT_WARN_TOKENS,
   createEmptyContextComposition,
   createEmptyDriftBreakdown,
+  createEmptyShortGapColdSummary,
   createEmptySubagentBreakdown,
   DEFAULT_CACHE_TTL_SEC,
   findTranscriptForConversation,
@@ -1078,6 +1080,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
     remainingSec: null,
     narrowMarginSkipped: false,
     narrowMarginRemSec: null,
+    shortCliffSkip: null,
     inFlight: false,
     pendingAck: Boolean(!isExplicitSubagentForKa && isKeepalivePendingAckActive(kaState)),
     hasLease: false,
@@ -1111,6 +1114,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
           pendingAck: false,
           narrowMarginSkipped: false,
           narrowMarginRemSec: null,
+          shortCliffSkip: null,
           hasLease: false,
           cacheOriginTs: 0,
           estimatedExpireTs: 0,
@@ -1131,6 +1135,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
           remainingSec: wdKa.remainingSec,
           narrowMarginSkipped: Boolean(wdKa.narrowMarginSkipped),
           narrowMarginRemSec: wdKa.narrowMarginRemSec ?? null,
+          shortCliffSkip: wdKa.shortCliffSkip ?? null,
           inFlight: Boolean(wdKa.inFlight),
           pendingAck: Boolean(wdKa.pendingAck),
           hasLease: Boolean(wdKa.hasLease),
@@ -1277,6 +1282,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
         prefix_drift: 0
       },
       driftBreakdown: createEmptyDriftBreakdown(),
+      shortGapColdSummary: createEmptyShortGapColdSummary(),
       wastedTokensTotal: 0,
       duplicateReadCount: 0,
       loopWatch: {
@@ -1569,6 +1575,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
       ...diag,
       checkStatus: scopedCheckStatus,
       driftBreakdown: diag.driftBreakdown ?? createEmptyDriftBreakdown(),
+      shortGapColdSummary: diag.shortGapColdSummary ?? createEmptyShortGapColdSummary(),
       contextComposition: diag.contextComposition ?? createEmptyContextComposition(),
       subagentBreakdown: diag.subagentBreakdown ?? createEmptySubagentBreakdown(),
       serverNowMs: diag.serverNowMs ?? Date.now()
@@ -1580,6 +1587,7 @@ function getCacheDiagPayload(data, defaultConvId = "default") {
       serverNowMs: Date.now(),
       checkStatus: createEmptyCheckStatus(),
       driftBreakdown: createEmptyDriftBreakdown(),
+      shortGapColdSummary: createEmptyShortGapColdSummary(),
       recentBusts: [],
       contextComposition: createEmptyContextComposition(),
       subagentBreakdown: createEmptySubagentBreakdown(),
@@ -3275,6 +3283,59 @@ export function createStandaloneServer({
   return srv;
 }
 
+export function createCleanShutdown({
+  isBusy = () => false,
+  onClose = async () => {},
+  exit = (code) => process.exit(code),
+  pollIntervalMs = 500,
+  maxWaitMs = 15_000,
+  setTimeoutFn = setTimeout,
+  now = Date.now
+} = {}) {
+  let shuttingDown = false;
+  let pendingPromise = null;
+  return function shutdownCleanly(code = 0) {
+    if (shuttingDown) return pendingPromise;
+    shuttingDown = true;
+    const deadlineMs = now() + maxWaitMs;
+    pendingPromise = (async () => {
+      while (true) {
+        let busy = false;
+        try {
+          busy = Boolean(isBusy());
+        } catch {
+          busy = false;
+        }
+        if (!busy || now() >= deadlineMs) break;
+        const waitMs = Math.max(1, Math.min(pollIntervalMs, deadlineMs - now()));
+        await new Promise((resolve) => {
+          const timer = setTimeoutFn(resolve, waitMs);
+          timer?.unref?.();
+        });
+      }
+      try {
+        await onClose();
+      } catch {}
+      exit(code);
+    })();
+    return pendingPromise;
+  };
+}
+
+export function maybeStartHostLivenessGuard({
+  env = process.env,
+  onHostGone,
+  createGuard = createHostLivenessGuard
+} = {}) {
+  if (env?.AGY_DART_DISABLE_LIVENESS_GUARD === "1") return null;
+  const guard = createGuard({
+    lsAddress: env?.ANTIGRAVITY_LS_ADDRESS,
+    onHostGone
+  });
+  guard.start();
+  return guard;
+}
+
 if (isDirectRun) {
   let SidecarApp = null;
   let SidecarResponse = null;
@@ -3318,6 +3379,7 @@ if (isDirectRun) {
     const watchedBackendFiles = [
       __selfPath,
       path.resolve(__dirname, "../../plugin.json"),
+      path.resolve(__dirname, "host-liveness.mjs"),
       path.resolve(__dirname, "http-helpers.mjs"),
       path.resolve(__dirname, "http-security.mjs"),
       path.resolve(__dirname, "update-coordinator.mjs"),
@@ -3359,21 +3421,35 @@ if (isDirectRun) {
     });
     monitor.start();
 
+    const updateMarkerPath = path.join(__dirname, "../..", UPDATE_MARKER_NAME);
+    let livenessGuard = null;
     let shuttingDown = false;
-    const shutdownCleanly = async (code = 0) => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      closeRuntimeStore();
-      try {
+    const runCleanShutdown = createCleanShutdown({
+      isBusy: () =>
+        isPluginUpdateBusy() ||
+        hasActiveUpdateMarker(updateMarkerPath) ||
+        Boolean(monitor?._keepaliveInFlight && monitor._keepaliveInFlight.size > 0),
+      onClose: async () => {
+        livenessGuard?.stop?.();
+        closeRuntimeStore();
         await app.close?.();
-      } catch {}
-      process.exit(code);
+      }
+    });
+    const shutdownCleanly = (code = 0) => {
+      shuttingDown = true;
+      return runCleanShutdown(code);
     };
     process.once("SIGTERM", () => {
       void shutdownCleanly(0);
     });
     process.once("SIGINT", () => {
       void shutdownCleanly(0);
+    });
+    livenessGuard = maybeStartHostLivenessGuard({
+      env: process.env,
+      onHostGone: () => {
+        void shutdownCleanly(0);
+      }
     });
 
     if (process.env.AGY_DART_DISABLE_SIDECAR_AUTORELOAD !== "1") {

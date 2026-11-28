@@ -1,11 +1,11 @@
 # `agy-dart` — AI 审阅技术简报（AI Review Brief）
 
 <!-- AUTO:INTRO:START -->
-> **本文档用途**：面向代码审阅 AI / 架构审计 AI / 安全审查 AI 的高密度项目总览与审阅路线图。对应当前版本 `v1.10.1`。代码行数、模块映射与测试数量由 `scripts/gen-review-brief.mjs` 自动同步并受 `--check` 漂移守卫保护。
+> **本文档用途**：面向代码审阅 AI / 架构审计 AI / 安全审查 AI 的高密度项目总览与审阅路线图。对应当前版本 `v1.10.3`。代码行数、模块映射与测试数量由 `scripts/gen-review-brief.mjs` 自动同步并受 `--check` 漂移守卫保护。
 <!-- AUTO:INTRO:END -->
 
 <!-- AUTO:META:START -->
-> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.1` · 核心追踪文件 70 个（合计 88,116 行） · 测试套件 59 个 / 411 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
+> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.3` · 核心追踪文件 72 个（合计 90,531 行） · 测试套件 62 个 / 422 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
 <!-- AUTO:META:END -->
 
 ---
@@ -113,13 +113,13 @@ flowchart TB
 | `context/lib/store/fts.js` | 1,026 | 标题感知 Markdown 分块、SHA-256 去重索引、Porter BM25 + Trigram RRF 检索与事件流 |
 | `context/lib/store/reads.js` | 880 | 会话未变更读去重（`file_reads`）、gzip 文本快照（`file_snapshots`）、会话轮次序与 Ghost Registry |
 | `context/lib/store/checkpoints.js` | 1,570 | 结构化会话恢复卡（`session_checkpoints`）、持久化符号大纲（`outline_cache`）与 `repo_cache` |
-| `context/lib/store/settings-maintenance.js` | 3,856 | `meta` 配置、阈值/豁免管理、`getStats`、`getFeatureRoi` 遥测 ROI 量化、TTL 清理与 `VACUUM` |
+| `context/lib/store/settings-maintenance.js` | 3,889 | `meta` 配置、阈值/豁免管理、`getStats`、`getFeatureRoi` 遥测 ROI 量化、TTL 清理与 `VACUUM` |
 | `context/lib/config.js` | 945 | 统一配置加载器（`~/.agy-dart/config.json` + `AGY_DART_*` 环境变量覆盖 + 生效来源追踪） |
 | `context/lib/conversation-api.js` | 432 | 官方 Connect HTTP+JSON `product.v1.ConversationService` 只读客户端（严格 loopback 校验、`GetConversation` 归档/子代理/运行态判定，供 Sidecar 与 Watchdog 优先查询并平滑降级至 `conversation_summaries.db`） |
 | `context/lib/cache/profiles.js` | 397 | `MODEL_CACHE_PROFILES`（含 Gemini 4/Neon/Carbon/Argon/Hydrogen、Claude 4 系列）、`resolveModelProfile`、`computeCacheWarmth` 与写溢价成本数学 |
 | `context/lib/cache/transcript-locator.js` | 506 | Transcript 定位与读取子模块（0-SQLite、WAL 感知 LRU 扫描缓存、`opendirSync` 有界目录遍历与尾部读取） |
 | `context/lib/cache/usage-normalizer.js` | 563 | 多厂商 Token 归一化、单对话窗口上限解析与跨会话实证 TTL 区间估计子模块 |
-| `context/lib/cache-analyzer.js` | 5,760 | Transcript KV-Cache 诊断引擎门面：7 桶 `contextComposition`、`subagentBreakdown`、死循环 `loopWatch`、6 类 Bust 归因（下拆 `context/lib/cache/` 子模块） |
+| `context/lib/cache-analyzer.js` | 5,918 | Transcript KV-Cache 诊断引擎门面：7 桶 `contextComposition`、`subagentBreakdown`、死循环 `loopWatch`、6 类 Bust 归因（下拆 `context/lib/cache/` 子模块） |
 | `context/lib/cache-simulator.js` | 1,518 | 离线策略回放引擎（devtools）：对比 9 套策略（`observed`、`ttl-5m`、`ttl-1h`、`cold-boundary-compact`、`cutoff-strict/balanced/relaxed`、`keepalive-1x/unlimited`） |
 | `context/lib/repo-skeleton.js` | 1,159 | `git HEAD` 缓存的核心依赖枢纽扫描（JS/TS + JSONC `tsconfig` `paths`、Python、Rust、Go `go.mod`、Vue/Svelte、Dart、Java） |
 | `context/lib/json-crusher.js` | 863 | 零依赖可逆 JSON/JSONL 结构化粉碎器：提取 Schema/空值统计 + 首尾样本 + 异常项，附带 FTS5 `sourceId` |
@@ -133,7 +133,7 @@ flowchart TB
 | `context/lib/watchdog-lease.js` | 77 | 看门狗租约兼容门面：聚合导出 `watchdog-lease-core`、`watchdog-transcript` 与 `watchdog-summaries` 全部符号 |
 | `context/lib/watchdog-notify.js` | 526 | 跨平台桌面弹窗提醒（Windows Toast / macOS / Linux）与原生窗口聚焦子模块 |
 | `context/lib/watchdog-keepalive.js` | 94 | 自动/手动续温（Keepalive）时序计算、安全护栏与冷静期判定纯函数子模块 |
-| `context/lib/watchdog.js` | 5,124 | Sidecar 卡死看门狗与空闲 TTL 临期提醒引擎（`WatchdogMonitor`）：双源融合状态机、动态超时矩阵、单 tick 共享配置快照、休眠时钟跳变防护与 6 类归因指引 |
+| `context/lib/watchdog.js` | 5,276 | Sidecar 卡死看门狗与空闲 TTL 临期提醒引擎（`WatchdogMonitor`）：双源融合状态机、动态超时矩阵、单 tick 共享配置快照、休眠时钟跳变防护与 6 类归因指引 |
 | `context/lib/text-diff.js` | 432 | 零依赖行级 Unified Diff 引擎：首尾裁剪 + 有界 Myers + 线性降级保护 + 1-based `startLine` 偏移 |
 | `context/lib/executor.js` | 943 | 当前系统用户权限下的有界子进程脚本执行器（JS/Node/Python/Shell/PowerShell/CMD，OS+工具链环境白名单、敏感凭据硬过滤、输出封顶与进程树超时清理） |
 | `context/lib/stable-json.js` | 95 | `stableSortObject`、`stableStringify`、`sha256Hex` 与规范 `truncateUtf8Safe`（保证 MCP Schema 指纹确定性与 UTF-8 码点安全截断） |
@@ -161,8 +161,9 @@ flowchart TB
 | `context/server.js` | 972 | `agy-dart_context` MCP stdio 服务端：紧凑 JSON 输出、出站 JSON-RPC `<= 8,800 B` 线长硬封顶、按客户端 `io.modelcontextprotocol/ui` 渐进式暴露 `ui://agy-dart/diagnostics.html` 内联 MCP App 卡片与 `structuredContent`，保留非 UI 端冻结规范排序 `TOOL_DEFINITIONS` |
 | `context/ui/diagnostics.html` | 844 | 零依赖单文件 SEP-1865 MCP App 内联诊断卡片：自动跟随宿主主题与 CSS 变量，可视化渲染 `ctx_stats` 节省率/Feature ROI 与 `ctx_doctor` 运行健康状态 |
 | `dsh/plugin.mjs` | 141 | DSH 原生工具桥接插件：透明挂接 pre/execute/result 钩子，失败/取消读自动失效待定缓存并保持 fail-open |
-| `bin/agy-dart.mjs` | 56 | 统一 CLI 入口（devtools）：派发 install/doctor/benchmark/cache-audit/prefix-budget/outline |
-| `scripts/cache-audit.mjs` | 4,262 | 全域环境 Prompt Cache 体检 `npm run cache:audit`（devtools）：规则/技能 CJK 估 token、双次握手探测 MCP 确定性、静态分析中段 Hook、`workspace`/`global` 归属统计与 `--workspace-only` 单仓过滤 |
+| `bin/agy-dart.mjs` | 59 | 统一 CLI 入口（devtools）：派发 install/doctor/benchmark/cache-audit/prefix-budget/outline |
+| `scripts/cache-audit.mjs` | 4,281 | 全域环境 Prompt Cache 体检 `npm run cache:audit`（devtools）：规则/技能 CJK 估 token、双次握手探测 MCP 确定性、静态分析中段 Hook、`workspace`/`global` 归属统计、`--workspace-only` 单仓过滤与 `#1890` 自定义 Agent 体检 |
+| `scripts/quota-audit.mjs` | 1,618 | 轻量 CLI 扣额归因与 `#1890` 4× 自定义 Agent 哨兵 `npm run quota:audit`（devtools）：全机多会话 1× 等效账单、自定义 Agent 及其后代谱系越界检测、复用 `#1886` 后台安检归因及 `--mark <剩余%>` 真实倍率校准 |
 | `scripts/install.mjs` | 1,558 | 跨平台安装/卸载/模式切换/`doctor` 健康自检：消费 `scripts/package-manifest.json` 导出 `RUNTIME_FILES`（默认）与 `DEVTOOLS_FILES`（`--with-devtools`），校验 5 大 Hook 与 Watchdog 并输出生效配置 |
 | `scripts/targets/index.mjs` | 281 | 多宿主安装/卸载/`doctor` 路由器与并发安全安装互斥锁（token + 新建宽限窗口 + `.reclaim` 失效锁回收） |
 | `scripts/targets/shared.mjs` | 300 | 多宿主共享运行时同步、托管文件哈希、退役清理与安装收据管理 |
@@ -172,20 +173,21 @@ flowchart TB
 | `scripts/targets/dsh.mjs` | 249 | DSH YAML 多 profile 宿主适配器：按 profile 独立注册收据、卸载保留用户追加列表项并保护共享运行时 |
 | `scripts/verify-package-graph.mjs` | 1,334 | 静态 Import 图打包校验器（devtools）：校验 `scripts/package-manifest.json` 与 `install.mjs` 导出一致性，线性 JS 词法解析器提取含/无分号（ASI）、多行、注释穿插与带属性动态导入的 ESM/CJS 依赖，证明无漏打模块且 devtools 零泄漏 |
 | `scripts/prefix-budget.mjs` | 1,151 | Turn-0 前缀预算、双 MCP 指纹、MCP `instructions` 与 `agents/*.md` 发现元数据开销统计及 `--calibrate` 跨语种校准审计（devtools） |
-| `scripts/gen-review-brief.mjs` | 463 | `AI_REVIEW_BRIEF.md` 全仓源文件覆盖校验、代码行数与测试基线自动生成及 `--check` 漂移守卫（devtools） |
+| `scripts/gen-review-brief.mjs` | 465 | `AI_REVIEW_BRIEF.md` 全仓源文件覆盖校验、代码行数与测试基线自动生成及 `--check` 漂移守卫（devtools） |
+| `sidecars/dashboard/host-liveness.mjs` | 305 | Sidecar 宿主失联双信号自退守卫（#1663，PPID + 回环独占 bind 探测，与 `agy-cmd` 逐字节一致） |
 | `sidecars/dashboard/http-helpers.mjs` | 13 | Sidecar 共享 HTTP 响应头大小写无关读取工具（`getHeader`，供 `version-check` 与 `update-archive` 共用） |
 | `sidecars/dashboard/http-security.mjs` | 266 | Sidecar HTTP 回环安全守卫：严格 `Host`/`Origin`/`Referer`/`Sec-Fetch-Site`、CSRF Token 常量时间比对、64 KB 有界 JSON 读取与参数校验 |
 | `sidecars/dashboard/update-coordinator.mjs` | 306 | Sidecar 版本检查、一键升级与静默自动更新编排器（单飞防并发、失败熔断与状态重置） |
-| `sidecars/dashboard/server.mjs` | 3,683 | Sidecar HTTP / SidecarApp 服务 + 常驻 Stall Watchdog 巡检与空闲自动 SQLite `VACUUM`：严格收紧 CSP 并统一托管 `/ui/*` 静态资源、提供 `/api/stats` 统一覆盖来源与碎片健康、`/api/maintenance` 无损压缩动作 |
-| `sidecars/dashboard/index.html` | 632 | 实时仪表盘语义 HTML 骨架（引用 `/ui/styles.css` 与 5 个原生静态脚本模块），含核心设置覆盖来源徽标与存储碎片无损压缩按钮 |
+| `sidecars/dashboard/server.mjs` | 3,759 | Sidecar HTTP / SidecarApp 服务 + 常驻 Stall Watchdog 巡检与空闲自动 SQLite `VACUUM`：严格收紧 CSP 并统一托管 `/ui/*` 静态资源、提供 `/api/stats` 统一覆盖来源与碎片健康、`/api/maintenance` 无损压缩动作 |
+| `sidecars/dashboard/index.html` | 634 | 实时仪表盘语义 HTML 骨架（引用 `/ui/styles.css` 与 5 个原生静态脚本模块），含核心设置覆盖来源徽标与存储碎片无损压缩按钮 |
 | `sidecars/dashboard/ui/theme-init.js` | 13 | 仪表盘首屏防白闪（FOUC）极简主题初始化脚本 |
-| `sidecars/dashboard/ui/i18n.js` | 1,151 | 仪表盘 EN/ZH 完整双语词典（严格键集对齐）与模板插值辅助 |
+| `sidecars/dashboard/ui/i18n.js` | 1,159 | 仪表盘 EN/ZH 完整双语词典（严格键集对齐）与模板插值辅助 |
 | `sidecars/dashboard/ui/search-state.js` | 95 | 仪表盘搜索与来源检查共享请求序号与状态管理（防乱序响应覆盖） |
 | `sidecars/dashboard/ui/theme-nav.js` | 531 | 仪表盘 Catppuccin Mocha / Light 主题切换、顶栏分节快跳与断点感知防抖 `ResizeObserver` 缓存 |
-| `sidecars/dashboard/ui/app.js` | 8,183 | 仪表盘主控逻辑：全部 `/api/*` 统一 POST JSON + CSRF、核心设置覆盖提示、SQLite 碎片展示与无损压缩、1s 本地倒计时及 `beforeunload`/`pagehide`/`pageshow` 生命周期管理 |
+| `sidecars/dashboard/ui/app.js` | 8,221 | 仪表盘主控逻辑：全部 `/api/*` 统一 POST JSON + CSRF、核心设置覆盖提示、SQLite 碎片展示与无损压缩、1s 本地倒计时及 `beforeunload`/`pagehide`/`pageshow` 生命周期管理 |
 | `sidecars/dashboard/version-check.mjs` | 267 | GitHub Releases SemVer 解析、发布包资产与 SHA-256 摘要筛选、单飞去重与限流冷却 |
 | `sidecars/dashboard/update-archive.mjs` | 332 | 更新归档安全下载与 tar.gz 解包（HTTPS 域名白名单、16 MiB/48 MiB 封顶、PAX/ustar 校验、防符号链接/穿越/重名与 SHA-256 核验） |
-| `sidecars/dashboard/version-update.mjs` | 1,377 | 主/次宿主在线自更新引擎：优先消费并校验 `scripts/package-manifest.json`、固定批准摘要、同盘暂存替换、逆序回滚与退役清理 |
+| `sidecars/dashboard/version-update.mjs` | 1,378 | 主/次宿主在线自更新引擎：优先消费并校验 `scripts/package-manifest.json`、固定批准摘要、同盘暂存替换、逆序回滚与退役清理 |
 <!-- AUTO:CODE_MAP:END -->
 
 ---
@@ -259,9 +261,9 @@ WAL 模式 + `busy_timeout = 5000` + `synchronous = NORMAL` + `_withBusyRetry` �
 
 <!-- AUTO:VERIFY_BASELINE:START -->
 ```bash
-# 1. 全量 59 个测试套件（覆盖全部生命周期钩子、双 MCP、缓存诊断、看门狗、多宿主安装/自更新、性能优化与安全回归）
+# 1. 全量 62 个测试套件（覆盖全部生命周期钩子、双 MCP、缓存诊断、看门狗、多宿主安装/自更新、性能优化与安全回归）
 npm test
-# 预期基线：411/411 PASS, 0 fail
+# 预期基线：422/422 PASS, 0 fail
 
 # 2. 静态 Import 图打包完整性与 runtime/devtools 隔离校验
 npm run verify:pkg

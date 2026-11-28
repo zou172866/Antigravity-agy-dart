@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.1 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.3 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.10.1 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,13 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.10.3
+- **Sidecar 宿主失联自退守卫（`#1663`）**：新增与 `agy-cmd` 逐字节一致的 `sidecars/dashboard/host-liveness.mjs`（PPID + 回环独占 bind 双信号、启动宽限期、首次存活门禁、支持 `AGY_DART_DISABLE_LIVENESS_GUARD=1` 禁用），升级 `shutdownCleanly` 在退出前每 500ms 轮询等待进行中的自更新或保活（最多 15s）后优雅关闭。
+
+### v1.10.2
+- **短间隔缓存悬崖诊断（`#1665/#1720`）**：在 `cache-analyzer.js` 新增纯计算 `shortGapColdSummary`（支持多会话聚合及中英文 Markdown / 侧栏诊断提示），保持 `bustsByCause`、`driftBreakdown` 与 `ttlObservations` 结构与计数不变。
+- **自动保活前置短悬崖熔断**：通过现有 SQLite `meta` 表新增跨会话冷断记录（`recordKeepaliveColdTrip` / `getRecentKeepaliveColdTrip`，零 DDL 改动）；Watchdog 进入保活窗口时对近期短间隔全零抖动自动暂停（`short_cliff_churn`，不消耗 `usedCount`），手动续温 1× 不拦截并附带 `warning: "short_cliff_churn"`，侧栏同步展示暂停徽标。
 
 ### v1.10.1
 - **移除内置自定义 Agent（规避 `#1890` 4× 配额扣费）**：已移除 `agents/dart-coder.md` 与 `agents/dart-reviewer.md`（同步清理 `package-manifest.json`、`package.json` 与 `verify-package-graph.mjs`），防止在 Antigravity `1.5.17+` 中误触发自定义 Agent 的 4× 配额倍率；推荐直接使用默认主会话或官方内置 `self` / `research`（1× 原价），全部 `agy-dart_fast` 与 `agy-dart_context` 工具照常生效。

@@ -47,6 +47,7 @@ import {
 import { buildHandoffBrief, inferWorkspaceFromStore, isSafeWorkspaceDir } from "./handoff.js";
 import { isSecretRedactionEnabled } from "./security.js";
 import {
+  analyzeTranscriptCache,
   DEFAULT_CACHE_TTL_SEC,
   estimateCalibratedTtl,
   extractStepTokenUsage,
@@ -55,7 +56,8 @@ import {
   isSlashCompactText,
   isSubagentStep,
   readTranscriptTail,
-  resolveModelProfile
+  resolveModelProfile,
+  SHORT_GAP_RECENT_MS
 } from "./cache-analyzer.js";
 import os from "node:os";
 import path from "node:path";
@@ -1113,6 +1115,10 @@ export class WatchdogMonitor {
     this.statFn = options.statFn || ((p) => fs.statSync(p));
     this._hasCustomReadTail = typeof options.readTailFn === "function";
     this.readTailFn = options.readTailFn || ((p, bytes) => readTranscriptTail(p, bytes, { minUsageSteps: 1 }));
+    this.analyzeTranscriptCacheFn =
+      typeof options.analyzeTranscriptCacheFn === "function"
+        ? options.analyzeTranscriptCacheFn
+        : analyzeTranscriptCache;
     this._hasCustomFindTranscript = typeof options.findTranscriptFn === "function";
     this.findTranscriptFn =
       options.findTranscriptFn || ((convId) => findTranscriptForConversation(convId, { exactOnly: true }));
@@ -1158,6 +1164,8 @@ export class WatchdogMonitor {
     this._ttlNotifiedKeys = new Map();
     this._turn0BackfillChecked = new Map();
     this._narrowMarginSkipped = new Map();
+    this._shortCliffCache = new Map();
+    this._shortCliffSkips = new Map();
     this._keepaliveInFlight = new Map();
     this._subagentIdentityCache = new Map();
     this._convApiCache = new Map();
@@ -2078,21 +2086,106 @@ export class WatchdogMonitor {
   }
 
   _pruneNarrowMarginSkipped(leases) {
-    if (!this._narrowMarginSkipped || this._narrowMarginSkipped.size === 0) return;
     const leaseById = new Map();
     for (const l of leases || []) {
       if (l && l.conversationId) leaseById.set(l.conversationId, l);
     }
-    for (const [id, entry] of this._narrowMarginSkipped.entries()) {
-      const l = leaseById.get(id);
-      if (!l || l.phase !== WATCHDOG_PHASES.IDLE) {
-        this._narrowMarginSkipped.delete(id);
-        continue;
+    if (this._narrowMarginSkipped && this._narrowMarginSkipped.size > 0) {
+      for (const [id, entry] of this._narrowMarginSkipped.entries()) {
+        const l = leaseById.get(id);
+        if (!l || l.phase !== WATCHDOG_PHASES.IDLE) {
+          this._narrowMarginSkipped.delete(id);
+          continue;
+        }
+        const anchor = l.idleAnchorTs || l.phaseChangedTs || l.updatedTs || 0;
+        if (!anchor || anchor !== entry.idleAnchorTs) {
+          this._narrowMarginSkipped.delete(id);
+        }
       }
-      const anchor = l.idleAnchorTs || l.phaseChangedTs || l.updatedTs || 0;
-      if (!anchor || anchor !== entry.idleAnchorTs) {
-        this._narrowMarginSkipped.delete(id);
+    }
+    if (this._shortCliffSkips && this._shortCliffSkips.size > 0) {
+      for (const [id, entry] of this._shortCliffSkips.entries()) {
+        const l = leaseById.get(id);
+        if (!l || l.phase !== WATCHDOG_PHASES.IDLE) {
+          this._shortCliffSkips.delete(id);
+          continue;
+        }
+        const anchor = l.idleAnchorTs || l.phaseChangedTs || l.updatedTs || 0;
+        if (!anchor || (entry.idleAnchorTs && anchor !== entry.idleAnchorTs)) {
+          this._shortCliffSkips.delete(id);
+        }
       }
+    }
+  }
+
+  _evaluateShortCliffGuard(store, lease, workingLease, idleAnchorTs, nowWallMs) {
+    try {
+      const convId = workingLease?.conversationId || lease?.conversationId || "";
+      const transcriptPath = workingLease?.transcriptPath || lease?.transcriptPath || "";
+      if (!convId || !transcriptPath) {
+        return { blocked: false };
+      }
+      const cacheKey = `${convId}:${idleAnchorTs || 0}`;
+      if (this._shortCliffCache.has(cacheKey)) {
+        return this._shortCliffCache.get(cacheKey);
+      }
+      const steps = this._hasCustomReadTail
+        ? this.readTailFn(transcriptPath, 131072)
+        : readTranscriptTail(transcriptPath);
+      if (!Array.isArray(steps) || steps.length === 0) {
+        const emptyRes = { blocked: false, summary: null, need: 2 };
+        if (this._shortCliffCache.size >= 256) {
+          const oldestKey = this._shortCliffCache.keys().next().value;
+          if (oldestKey !== undefined) this._shortCliffCache.delete(oldestKey);
+        }
+        this._shortCliffCache.set(cacheKey, emptyRes);
+        return emptyRes;
+      }
+      const cfg = this.getConfig?.() || {};
+      let historicalTtlByProfile = null;
+      if (typeof store?.getAllModelTtlCalibrations === "function") {
+        try {
+          historicalTtlByProfile = store.getAllModelTtlCalibrations(nowWallMs);
+        } catch {}
+      }
+      const diagOpts = {
+        nowMs: nowWallMs,
+        conversationId: convId,
+        ...(historicalTtlByProfile ? { historicalTtlByProfile } : {})
+      };
+      const cwd = workingLease?.cwd || lease?.cwd || "";
+      if (cwd) diagOpts.workspaceCwd = cwd;
+      const cfgTtl = Number(cfg.cacheTtlSec);
+      if (Number.isFinite(cfgTtl) && cfgTtl > 0) diagOpts.ttlSec = Math.floor(cfgTtl);
+      const diag = this.analyzeTranscriptCacheFn(steps, diagOpts);
+      const s = diag?.shortGapColdSummary;
+      if (!s || typeof s !== "object") {
+        return { blocked: false };
+      }
+      const profileId = diag?.modelProfile?.id || resolveModelProfile(workingLease?.model || lease?.model).id;
+      const recentTrip =
+        typeof store?.getRecentKeepaliveColdTrip === "function"
+          ? store.getRecentKeepaliveColdTrip(profileId, nowWallMs)
+          : null;
+      const need = recentTrip ? 1 : 2;
+      const fresh =
+        s.lastQualifyingAtMs !== null &&
+        Number.isFinite(Number(s.lastQualifyingAtMs)) &&
+        nowWallMs - Number(s.lastQualifyingAtMs) <= SHORT_GAP_RECENT_MS;
+      const blocked = Boolean(
+        fresh &&
+          Number(s.recentQualifyingCount || 0) >= need &&
+          Number(s.hotReleaseStreak || 0) < 2
+      );
+      const res = { blocked, summary: s, need };
+      if (this._shortCliffCache.size >= 256) {
+        const oldestKey = this._shortCliffCache.keys().next().value;
+        if (oldestKey !== undefined) this._shortCliffCache.delete(oldestKey);
+      }
+      this._shortCliffCache.set(cacheKey, res);
+      return res;
+    } catch {
+      return { blocked: false };
     }
   }
 
@@ -2136,7 +2229,8 @@ export class WatchdogMonitor {
             return { applied: false, cold: Boolean(curKa.coldMissTripped) };
           }
           const checkedId = expectedPendingId || expectedDispatchId;
-          const nextCold = Boolean(curKa.coldMissTripped || isCold);
+          const prevCold = Boolean(curKa.coldMissTripped);
+          const nextCold = Boolean(prevCold || isCold);
           store.setTtlKeepaliveState?.(convId, {
             coldMissTripped: nextCold,
             pendingColdCheckId: "",
@@ -2144,7 +2238,7 @@ export class WatchdogMonitor {
             lastColdCheckUsed: Math.max(curKa.usedCount || 0, curKa.lastColdCheckUsed || 0),
             updatedTs: nowWallMs
           });
-          return { applied: true, cold: nextCold };
+          return { applied: true, cold: nextCold, trippedNow: !prevCold && nextCold };
         };
         const txRes =
           typeof store._withWriteTx === "function"
@@ -2152,6 +2246,11 @@ export class WatchdogMonitor {
             : applyResult();
         verified = Boolean(txRes?.applied);
         coldTrippedNow = Boolean(txRes?.cold);
+        if (txRes?.trippedNow) {
+          try {
+            store.recordKeepaliveColdTrip?.(resolveModelProfile(lease?.model).id, nowWallMs);
+          } catch {}
+        }
       }
     } catch {}
     return { checked: verified, coldTripped: coldTrippedNow };
@@ -2407,6 +2506,7 @@ export class WatchdogMonitor {
 
       if (sentOnCurrentIdleCycle) {
         this._narrowMarginSkipped.delete(lease.conversationId);
+        this._shortCliffSkips.delete(lease.conversationId);
         coveredConvIds.add(lease.conversationId);
         continue;
       }
@@ -2437,6 +2537,24 @@ export class WatchdogMonitor {
           kaState = store.getTtlKeepaliveState(lease.conversationId);
         }
       }
+
+      // Pre-emptive short-cliff churn breaker (#1665/#1720): pause auto-keepalive without
+      // consuming usedCount or writing kaState when recent short-gap zero-read churn is active.
+      const cliffGuard = this._evaluateShortCliffGuard(store, lease, workingLease, idleAnchorTs, nowWallMs);
+      if (cliffGuard.blocked) {
+        this._shortCliffSkips.set(lease.conversationId, {
+          skippedReason: "short_cliff_churn",
+          idleAnchorTs,
+          atMs: nowWallMs,
+          count: cliffGuard.summary?.count || 0,
+          under60sCount: cliffGuard.summary?.under60sCount || 0,
+          minGapSec: cliffGuard.summary?.minGapSec ?? null,
+          attribution: cliffGuard.summary?.attribution || "unknown",
+          need: cliffGuard.need
+        });
+        continue;
+      }
+      this._shortCliffSkips.delete(lease.conversationId);
 
       const lastAutoCooldownTs = Math.max(kaState.lastSentTs || 0, kaState.lastAttemptTs || 0);
       if (lastAutoCooldownTs > 0 && nowWallMs - lastAutoCooldownTs < 25_000) {
@@ -2653,6 +2771,7 @@ export class WatchdogMonitor {
       };
 
       this._narrowMarginSkipped.delete(convId);
+      this._shortCliffSkips.delete(convId);
       this._keepaliveInFlight.set(convId, dispatchId);
 
       Promise.resolve()
@@ -3083,7 +3202,16 @@ export class WatchdogMonitor {
       sentAtMs: claimRes.sentAtMs
     };
 
+    const manualCliffGuard = this._evaluateShortCliffGuard(
+      store,
+      lease,
+      claimRes.lease || lease,
+      claimedTiming.idleAnchorTs,
+      claimRes.sentAtMs || nowWallMs
+    );
+
     this._narrowMarginSkipped.delete(convId);
+    this._shortCliffSkips.delete(convId);
     this._keepaliveInFlight.set(convId, dispatchId);
 
     Promise.resolve()
@@ -3159,7 +3287,8 @@ export class WatchdogMonitor {
       cacheOriginTs: claimedTiming.originTs,
       estimatedExpireTs: claimedTiming.estimatedExpireTs,
       effectiveMinRemainSec: effMinRemSec,
-      tightMargin
+      tightMargin,
+      ...(manualCliffGuard.blocked ? { warning: "short_cliff_churn" } : {})
     };
   }
 
@@ -4660,6 +4789,7 @@ export class WatchdogMonitor {
     let remainingSec = null;
     let narrowMarginSkipped = false;
     let narrowMarginRemSec = null;
+    let shortCliffSkip = null;
     if (persistedTargetLease) {
       if (persistedTargetLease.phase === WATCHDOG_PHASES.IDLE && persistedTargetLease.subphase === "stopped") {
         const timing = computeLeaseTtlTiming(persistedTargetLease, { effectiveTtlSec, nowWallMs });
@@ -4680,6 +4810,27 @@ export class WatchdogMonitor {
           ) {
             narrowMarginSkipped = true;
             narrowMarginRemSec = skipEntry.remSec;
+          }
+          const cliffEntry =
+            kaTargetConvId && kaTargetConvId !== "__unbound__"
+              ? this._shortCliffSkips.get(kaTargetConvId)
+              : null;
+          if (
+            cliffEntry &&
+            (!cliffEntry.idleAnchorTs || cliffEntry.idleAnchorTs === timing.idleAnchorTs) &&
+            !inFlight &&
+            !pendingAck &&
+            kaState.lastIdleAnchorTs !== timing.idleAnchorTs
+          ) {
+            shortCliffSkip = {
+              skippedReason: cliffEntry.skippedReason,
+              atMs: cliffEntry.atMs,
+              count: cliffEntry.count,
+              under60sCount: cliffEntry.under60sCount,
+              minGapSec: cliffEntry.minGapSec,
+              attribution: cliffEntry.attribution,
+              need: cliffEntry.need
+            };
           }
         } else if (persistedTargetLease.cacheOriginTs > 0) {
           cacheOriginTs = Math.floor(persistedTargetLease.cacheOriginTs);
@@ -4780,6 +4931,7 @@ export class WatchdogMonitor {
         remainingSec,
         narrowMarginSkipped,
         narrowMarginRemSec,
+        shortCliffSkip,
         inFlight,
         pendingAck,
         hasLease,

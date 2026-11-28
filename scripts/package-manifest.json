@@ -66,6 +66,7 @@
     "sidecars/dashboard/ui/search-state.js",
     "sidecars/dashboard/ui/theme-nav.js",
     "sidecars/dashboard/ui/app.js",
+    "sidecars/dashboard/host-liveness.mjs",
     "sidecars/dashboard/http-helpers.mjs",
     "sidecars/dashboard/http-security.mjs",
     "sidecars/dashboard/update-coordinator.mjs",

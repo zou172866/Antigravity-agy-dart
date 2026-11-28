@@ -2854,6 +2854,27 @@ export function createEmptyDriftBreakdown() {
   };
 }
 
+export const SHORT_GAP_MIN_SEC = 20;
+export const SHORT_GAP_WINDOW_TURNS = 5;
+export const SHORT_GAP_RECENT_MS = 30 * 60 * 1000;
+export const SHORT_GAP_RELEASE_HOT_GAP_SEC = 60;
+
+/** Return a clean zero-initialized shortGapColdSummary structure (#1665/#1720) */
+export function createEmptyShortGapColdSummary() {
+  return {
+    count: 0,
+    under60sCount: 0,
+    minGapSec: null,
+    maxGapSec: null,
+    recentQualifyingCount: 0,
+    lastQualifyingAtMs: null,
+    hotReleaseStreak: 0,
+    shortGapHotCount: 0,
+    recentChurn: false,
+    attribution: "none"
+  };
+}
+
 const MILD_PRUNE_MIN_PREV_TOKENS = 12000;
 const MILD_PRUNE_KEEP_RATIO = 0.85;
 const MILD_PRUNE_MIN_DROP_TOKENS = 8000;
@@ -3100,6 +3121,14 @@ export function analyzeTranscriptCache(steps, options = {}) {
     prefix_drift: 0
   };
   const driftBreakdown = createEmptyDriftBreakdown();
+  const shortGapColdSummary = createEmptyShortGapColdSummary();
+  const eligibleWindow = [];
+  const pushShortGapWindow = (entry) => {
+    eligibleWindow.push(entry);
+    if (eligibleWindow.length > SHORT_GAP_WINDOW_TURNS) {
+      eligibleWindow.shift();
+    }
+  };
   const recentBusts = [];
   const allTurns = [];
   const turnMeta = [];
@@ -4650,12 +4679,26 @@ export function analyzeTranscriptCache(steps, options = {}) {
           deltaTokens < tailReprocessThreshold &&
           safeCache > 0 &&
           prevCtxTokens - safeCache <= tailReprocessThreshold + 256;
+        const upperSec =
+          explicitTtlSec !== null && explicitTtlSec > 0
+            ? explicitTtlSec
+            : activeTurnProfile.ttlSec || DEFAULT_CACHE_TTL_SEC;
         const isBust =
           !isExpectedSmallDeltaTailReprocess &&
           (retainedRatio < BUST_DROP_RATIO || (prevCtxTokens >= 10000 && safeCache === 0));
 
         if (!isBust) {
           if (safeCache > 0) turnWasWarmHit = true;
+          if (turnUsage.cacheReadReported && safeCache > 0 && sameModel && gapSec !== null) {
+            if (gapSec < SHORT_GAP_MIN_SEC) {
+              shortGapColdSummary.shortGapHotCount += 1;
+            } else if (gapSec < upperSec) {
+              pushShortGapWindow({ qualifying: false, hot: true, gapSec, atMs: tMs ?? nowMs });
+              if (gapSec >= SHORT_GAP_RELEASE_HOT_GAP_SEC) {
+                shortGapColdSummary.hotReleaseStreak += 1;
+              }
+            }
+          }
           if (retainedRatio >= BUST_DROP_RATIO && safeCache > 0 && gapSec !== null && sameModel) {
             if (maxWarmHitGapSec === null || gapSec > maxWarmHitGapSec) {
               maxWarmHitGapSec = gapSec;
@@ -4734,6 +4777,37 @@ export function analyzeTranscriptCache(steps, options = {}) {
             } else {
               turnBustReadState = "partial";
               driftBreakdown.partialRead += 1;
+            }
+            if (
+              turnUsage.cacheReadReported &&
+              safeCache === 0 &&
+              sameModel &&
+              !mediaLoadedSincePrev &&
+              !systemMsgSincePrev &&
+              ctxTok >= prevCtxTokens * BUST_DROP_RATIO &&
+              gapSec !== null &&
+              gapSec >= SHORT_GAP_MIN_SEC &&
+              gapSec < upperSec
+            ) {
+              const sampleAtMs = tMs ?? nowMs;
+              shortGapColdSummary.count += 1;
+              if (gapSec <= 60) {
+                shortGapColdSummary.under60sCount += 1;
+              }
+              if (shortGapColdSummary.minGapSec === null || gapSec < shortGapColdSummary.minGapSec) {
+                shortGapColdSummary.minGapSec = gapSec;
+              }
+              if (shortGapColdSummary.maxGapSec === null || gapSec > shortGapColdSummary.maxGapSec) {
+                shortGapColdSummary.maxGapSec = gapSec;
+              }
+              if (
+                shortGapColdSummary.lastQualifyingAtMs === null ||
+                sampleAtMs > shortGapColdSummary.lastQualifyingAtMs
+              ) {
+                shortGapColdSummary.lastQualifyingAtMs = sampleAtMs;
+              }
+              shortGapColdSummary.hotReleaseStreak = 0;
+              pushShortGapWindow({ qualifying: true, hot: false, gapSec, atMs: sampleAtMs });
             }
           }
           const expectedReusable = Math.min(prevCtxTokens, ctxTok);
@@ -5266,6 +5340,24 @@ export function analyzeTranscriptCache(steps, options = {}) {
     bustCount,
     bustsByCause,
     driftBreakdown,
+    shortGapColdSummary: (() => {
+      shortGapColdSummary.recentQualifyingCount = eligibleWindow.filter((e) => e.qualifying).length;
+      const fresh =
+        shortGapColdSummary.lastQualifyingAtMs !== null &&
+        nowMs - shortGapColdSummary.lastQualifyingAtMs <= SHORT_GAP_RECENT_MS;
+      shortGapColdSummary.recentChurn = Boolean(
+        fresh &&
+          shortGapColdSummary.recentQualifyingCount >= 2 &&
+          shortGapColdSummary.hotReleaseStreak < 2
+      );
+      shortGapColdSummary.attribution =
+        shortGapColdSummary.count === 0
+          ? "none"
+          : shortGapColdSummary.shortGapHotCount >= 1 && shortGapColdSummary.under60sCount >= 1
+            ? "server_cliff_likely"
+            : "unknown";
+      return shortGapColdSummary;
+    })(),
     wastedTokensTotal,
     totalMediaCount,
     multimodalHighCtxTurns,
@@ -5292,6 +5384,9 @@ export function analyzeMultipleSessionsCache(sessions, options = {}) {
     prefix_drift: 0
   };
   const driftBreakdown = createEmptyDriftBreakdown();
+  const shortGapColdSummary = createEmptyShortGapColdSummary();
+  let anyShortGapServerCliff = false;
+  let anyShortGapUnknown = false;
   let sessionCount = 0;
   let turnsWithUsage = 0;
   let warmTurns = 0;
@@ -5404,6 +5499,39 @@ export function analyzeMultipleSessionsCache(sessions, options = {}) {
       driftBreakdown.partialRead += res.driftBreakdown.partialRead || 0;
       driftBreakdown.unreportedRead += res.driftBreakdown.unreportedRead || 0;
     }
+    if (res.shortGapColdSummary) {
+      const sg = res.shortGapColdSummary;
+      shortGapColdSummary.count += sg.count || 0;
+      shortGapColdSummary.under60sCount += sg.under60sCount || 0;
+      shortGapColdSummary.shortGapHotCount += sg.shortGapHotCount || 0;
+      shortGapColdSummary.recentQualifyingCount += sg.recentQualifyingCount || 0;
+      if (sg.minGapSec !== null && sg.minGapSec !== undefined) {
+        shortGapColdSummary.minGapSec =
+          shortGapColdSummary.minGapSec === null
+            ? sg.minGapSec
+            : Math.min(shortGapColdSummary.minGapSec, sg.minGapSec);
+      }
+      if (sg.maxGapSec !== null && sg.maxGapSec !== undefined) {
+        shortGapColdSummary.maxGapSec =
+          shortGapColdSummary.maxGapSec === null
+            ? sg.maxGapSec
+            : Math.max(shortGapColdSummary.maxGapSec, sg.maxGapSec);
+      }
+      if (sg.lastQualifyingAtMs !== null && sg.lastQualifyingAtMs !== undefined) {
+        shortGapColdSummary.lastQualifyingAtMs =
+          shortGapColdSummary.lastQualifyingAtMs === null
+            ? sg.lastQualifyingAtMs
+            : Math.max(shortGapColdSummary.lastQualifyingAtMs, sg.lastQualifyingAtMs);
+      }
+      if (sg.recentChurn) {
+        shortGapColdSummary.recentChurn = true;
+      }
+      if (sg.attribution === "server_cliff_likely") {
+        anyShortGapServerCliff = true;
+      } else if (sg.attribution === "unknown") {
+        anyShortGapUnknown = true;
+      }
+    }
     for (const b of res.recentBusts) {
       allRecentBusts.push({ item: b, ts: parseTimeMs(b?.at), ord: allRecentBusts.length });
     }
@@ -5460,6 +5588,12 @@ export function analyzeMultipleSessionsCache(sessions, options = {}) {
   const contextComposition = finalizeContextComposition(aggCompRaw);
   const subagentBreakdown = finalizeSubagentBreakdown(aggSubRaw, contextComposition.totalEstTokens);
 
+  shortGapColdSummary.attribution = anyShortGapServerCliff
+    ? "server_cliff_likely"
+    : anyShortGapUnknown
+      ? "unknown"
+      : "none";
+
   return {
     sessions: sessionCount,
     turnsWithUsage,
@@ -5484,6 +5618,7 @@ export function analyzeMultipleSessionsCache(sessions, options = {}) {
     bustCount,
     bustsByCause,
     driftBreakdown,
+    shortGapColdSummary,
     wastedTokensTotal,
     multimodalHighCtxTurns,
     duplicateReadCount,
@@ -5542,7 +5677,7 @@ function formatUsdReport(val) {
 }
 
 /** Render a concise Markdown table + ASCII trend strip + Top-3 context growth attribution */
-export function formatCacheDiagMarkdown(diag) {
+export function formatCacheDiagMarkdown(diag, options = {}) {
   const pct = (r) => `${(Number(r || 0) * 100).toFixed(1)}%`;
   const discountRate =
     Number.isFinite(diag.cacheDiscountRate) && diag.cacheDiscountRate > 0 && diag.cacheDiscountRate <= 1
@@ -5676,6 +5811,29 @@ export function formatCacheDiagMarkdown(diag) {
         `step ${isNonNegFinite(b.stepIndex) ? b.stepIndex : "?"}: subsequent cache read near step ${b.priorContextMatch.referenceStepIndex} (recovered at step ${b.priorContextMatch.recoveryStepIndex})`
     );
     lines.push(`| Prior-context read match (observation) | ${priorMatches.length} (${notes.join("; ")}) |`);
+  }
+  const sg =
+    diag.shortGapColdSummary && typeof diag.shortGapColdSummary === "object"
+      ? diag.shortGapColdSummary
+      : null;
+  const sgCount = sg && isNonNegFinite(sg.count) ? Math.floor(sg.count) : 0;
+  if (sgCount > 0) {
+    const sgMinVal = isNonNegFinite(sg.minGapSec) ? Math.round(sg.minGapSec) : null;
+    const sgMinStr = sgMinVal !== null ? `${sgMinVal}s` : "--";
+    const mdLang = options?.lang === "zh" || diag?.uiLang === "zh" ? "zh" : "en";
+    if (mdLang === "zh") {
+      const sgDesc =
+        sg.attribution === "server_cliff_likely"
+          ? `检测到 ${sgCount} 次短间隔（最短 ${sgMinStr}）全零冷未命中；短间隔轮次仍有热命中，疑似服务端缓存悬崖/路由抖动（#1665/#1720）`
+          : `检测到 ${sgCount} 次短间隔（最短 ${sgMinStr}）全零冷未命中（原因未定：可能是服务端抖动，也可能是本地开头前缀变化）`;
+      lines.push(`| 短间隔冷未命中（观察） | ${sgDesc} |`);
+    } else {
+      const sgDesc =
+        sg.attribution === "server_cliff_likely"
+          ? `Detected ${sgCount} short-gap (min ${sgMinStr}) zero-read cold misses; shorter-gap turns still hit warm, suspected server-side cache cliff / routing churn (#1665/#1720)`
+          : `Detected ${sgCount} short-gap (min ${sgMinStr}) zero-read cold misses (unattributed: may be server-side churn or local leading prefix change)`;
+      lines.push(`| Short-gap cold misses (observation) | ${sgDesc} |`);
+    }
   }
   if (diag.loopWatch && diag.loopWatch.status !== "ok") {
     lines.push(

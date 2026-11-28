@@ -261,6 +261,7 @@ const ENGINE_ENTRIES = [
   ["scripts/verify-package-graph.mjs", "静态 Import 图打包校验器（devtools）：校验 `scripts/package-manifest.json` 与 `install.mjs` 导出一致性，线性 JS 词法解析器提取含/无分号（ASI）、多行、注释穿插与带属性动态导入的 ESM/CJS 依赖，证明无漏打模块且 devtools 零泄漏"],
   ["scripts/prefix-budget.mjs", "Turn-0 前缀预算、双 MCP 指纹、MCP `instructions` 与 `agents/*.md` 发现元数据开销统计及 `--calibrate` 跨语种校准审计（devtools）"],
   ["scripts/gen-review-brief.mjs", "`AI_REVIEW_BRIEF.md` 全仓源文件覆盖校验、代码行数与测试基线自动生成及 `--check` 漂移守卫（devtools）"],
+  ["sidecars/dashboard/host-liveness.mjs", "Sidecar 宿主失联双信号自退守卫（#1663，PPID + 回环独占 bind 探测，与 `agy-cmd` 逐字节一致）"],
   ["sidecars/dashboard/http-helpers.mjs", "Sidecar 共享 HTTP 响应头大小写无关读取工具（`getHeader`，供 `version-check` 与 `update-archive` 共用）"],
   ["sidecars/dashboard/http-security.mjs", "Sidecar HTTP 回环安全守卫：严格 `Host`/`Origin`/`Referer`/`Sec-Fetch-Site`、CSRF Token 常量时间比对、64 KB 有界 JSON 读取与参数校验"],
   ["sidecars/dashboard/update-coordinator.mjs", "Sidecar 版本检查、一键升级与静默自动更新编排器（单飞防并发、失败熔断与状态重置）"],

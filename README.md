@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 Send this to Antigravity:
 
 ```text
-Clone tag v1.10.1 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.10.3 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.10.1 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,13 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.10.3
+- **Sidecar host-liveness auto-exit (`#1663`)**: Added shared byte-identical `sidecars/dashboard/host-liveness.mjs` (dual PPID + exclusive loopback bind probe, grace window, alive-observation gate, `AGY_DART_DISABLE_LIVENESS_GUARD=1` kill-switch) and upgraded `shutdownCleanly` to wait up to 15s (500ms polling) for in-flight updates or keepalives before closing cleanly.
+
+### v1.10.2
+- **Short-gap cold-cliff diagnostics (`#1665/#1720`)**: Added pure `shortGapColdSummary` to `cache-analyzer.js` (including multi-session aggregation and EN/ZH Markdown & Dashboard diagnostics) without altering `bustsByCause`, `driftBreakdown`, or `ttlObservations`.
+- **Pre-emptive auto-keepalive short-cliff guard**: Added B-lite cross-session cold-trip meta helpers (`recordKeepaliveColdTrip` / `getRecentKeepaliveColdTrip`, zero DDL changes) and Watchdog pre-emptive auto-keepalive pause (`short_cliff_churn`, preserving `usedCount` and leaving manual 1× warming unblocked with a `short_cliff_churn` warning).
 
 ### v1.10.1
 - **Removed bundled custom agents (`#1890` 4× quota protection)**: Removed `agents/dart-coder.md` and `agents/dart-reviewer.md` (plus cleaned `package-manifest.json`, `package.json`, and `verify-package-graph.mjs`) so Antigravity `1.5.17+` sessions never accidentally trigger the 4× custom-agent quota multiplier; use the default main session or built-in `self` / `research` (1× standard quota) instead—all `agy-dart_fast` and `agy-dart_context` MCP tools work automatically.
