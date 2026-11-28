@@ -543,11 +543,11 @@ function normalizeSafeSessionWorkspaceDir(rawDir, { pluginRootNorm = null } = {}
   const norm = process.platform === "win32" ? real.toLowerCase() : real;
   try {
     const homeNorm = normalizeStoreCompareDir(os.homedir());
-    if (homeNorm && norm === homeNorm) return null;
+    if (homeNorm && (norm === homeNorm || isStoreSameOrSubDir(homeNorm, norm))) return null;
   } catch {}
   try {
     const tmpNorm = normalizeStoreCompareDir(os.tmpdir());
-    if (tmpNorm && norm === tmpNorm) return null;
+    if (tmpNorm && (norm === tmpNorm || isStoreSameOrSubDir(tmpNorm, norm))) return null;
   } catch {}
   if (isStoreInsideInstalledPluginDir(real, pluginRootNorm)) return null;
   return { dir: abs, canonicalKey: norm };
@@ -1639,17 +1639,29 @@ export class SettingsMaintenanceMethods {
     const target = normalizeSafeSessionWorkspaceDir(workspaceDir, { pluginRootNorm });
     if (!target) return "";
     const activeRecords = this._collectActiveWorkspaceRecords({ maxAgeMs, nowMs });
-    const matchedRootIds = new Set();
+    const exactPrimaryRootIds = new Set();
+    const exactAnyRootIds = new Set();
+    const parentAnyRootIds = new Set();
     for (const rec of activeRecords) {
-      if (rec.isSubagent) continue;
       const valid = normalizeSafeSessionWorkspaceDir(rec.cwd, { pluginRootNorm });
-      if (!valid || valid.canonicalKey !== target.canonicalKey) continue;
+      if (!valid) continue;
       const rootSid =
         typeof this.resolveRootSessionId === "function" ? this.resolveRootSessionId(rec.cid) : rec.cid;
-      if (rootSid) matchedRootIds.add(rootSid);
-      if (matchedRootIds.size > 1) return "";
+      if (!rootSid) continue;
+      if (valid.canonicalKey === target.canonicalKey) {
+        exactAnyRootIds.add(rootSid);
+        if (!rec.isSubagent) exactPrimaryRootIds.add(rootSid);
+      } else if (isStoreSameOrSubDir(target.canonicalKey, valid.canonicalKey)) {
+        parentAnyRootIds.add(rootSid);
+      }
     }
-    return matchedRootIds.size === 1 ? [...matchedRootIds][0] : "";
+    if (exactPrimaryRootIds.size === 1 && exactAnyRootIds.size === 1) {
+      return [...exactPrimaryRootIds][0];
+    }
+    if (exactAnyRootIds.size === 0 && parentAnyRootIds.size === 1) {
+      return [...parentAnyRootIds][0];
+    }
+    return "";
   }
 
   /**

@@ -83,6 +83,12 @@
     let cachedConvId = '';
     let selectedConvOverride = '';
     let inferredFallbackConvId = '';
+    let workspaceMismatchNativeId = '';
+    let workspaceMismatchNativeCwd = '';
+    let workspaceMismatchNativeWsLabel = '';
+    let lastNotifiedWorkspaceKey = '';
+    let pendingWorkspaceReconcile = false;
+    let wsChangeSeq = 0;
     let cachedHostWorkspacePaths = null;
     let hostWorkspaceInitStarted = false;
     const HOST_WORKSPACE_TIMEOUT_MS = 200;
@@ -181,12 +187,21 @@
     function getNativeHostConversationId() {
       try {
         const params = new URLSearchParams(window.location?.search || '');
-        const raw = window.sidecar?.conversationId || params.get('conversationId') || '';
+        const raw = params.get('conversationId') || window.sidecar?.conversationId || '';
         return typeof raw === 'string' ? raw.trim() : '';
       } catch {
         const raw = window.sidecar?.conversationId || '';
         return typeof raw === 'string' ? raw.trim() : '';
       }
+    }
+
+    function getEffectiveNativeConversationId() {
+      const nativeId = getNativeHostConversationId();
+      if (!nativeId) return '';
+      if (workspaceMismatchNativeId && nativeId === workspaceMismatchNativeId) {
+        return '';
+      }
+      return nativeId;
     }
 
     let lastSeenNativeConvId = getNativeHostConversationId();
@@ -236,7 +251,7 @@
       if (isSpecificConversationId(selectedConvOverride)) {
         return selectedConvOverride.trim();
       }
-      const nativeId = getNativeHostConversationId();
+      const nativeId = getEffectiveNativeConversationId();
       if (isSpecificConversationId(nativeId)) {
         return nativeId;
       }
@@ -255,6 +270,10 @@
         ++hostSwitchEpoch;
         selectedConvOverride = '';
         inferredFallbackConvId = '';
+        workspaceMismatchNativeId = '';
+        workspaceMismatchNativeCwd = '';
+        workspaceMismatchNativeWsLabel = '';
+        pendingWorkspaceReconcile = false;
         pendingCustomOverrideConvId = '';
         windowCustomIntervalOpen = false;
         sawOutOfOrderWatchdogAction = false;
@@ -289,7 +308,9 @@
 
     function getActiveConversationId() {
       const nativeId = syncNativeHostConversation({ reloadIfOpen: handoffDrawerOpen });
-      return selectedConvOverride || nativeId || (!window.sidecar ? inferredFallbackConvId : '');
+      const effectiveNativeId =
+        workspaceMismatchNativeId && nativeId === workspaceMismatchNativeId ? '' : nativeId;
+      return selectedConvOverride || effectiveNativeId || (!window.sidecar ? inferredFallbackConvId : '');
     }
 
     function decodeWorkspaceUriClient(raw) {
@@ -354,6 +375,169 @@
       return classifyWorkspaceCwdMatch(wsList, cwd, workspaceLabel) !== 'none';
     }
 
+    function findWatchdogSessionById(convId, wd = cachedWatchdog) {
+      if (!convId || !wd || typeof wd !== 'object') return null;
+      if (Array.isArray(wd.sessions)) {
+        const found = wd.sessions.find((s) => s && s.conversationId === convId);
+        if (found) return found;
+      }
+      if (wd.current && wd.current.conversationId === convId) {
+        return wd.current;
+      }
+      return null;
+    }
+
+    function pickUniqueWorkspacePrimarySession(wsList, wd = cachedWatchdog) {
+      if (!Array.isArray(wsList) || wsList.length === 0 || !wd || !Array.isArray(wd.sessions)) return null;
+      const matching = wd.sessions.filter(
+        (s) =>
+          s &&
+          !s.isSubagent &&
+          isValidSwitcherConvId(s.conversationId) &&
+          s.cwd &&
+          doesWorkspaceMatchCwd(wsList, s.cwd, s.workspaceLabel || '')
+      );
+      if (matching.length === 0) return null;
+      const activeMatching = matching.filter((s) => s.phase && s.phase !== 'IDLE');
+      if (activeMatching.length === 1) return activeMatching[0];
+      if (activeMatching.length === 0 && matching.length === 1) return matching[0];
+      return null;
+    }
+
+    function reconcileActiveConversationWithWorkspace(
+      wsList,
+      { triggerRefresh = false, wd = cachedWatchdog, workspaceChanged = false } = {}
+    ) {
+      if (!Array.isArray(wsList) || wsList.length === 0 || !wd || typeof wd !== 'object') {
+        return false;
+      }
+      const rawNativeId = getNativeHostConversationId();
+      const pj = wd.pendingJump && typeof wd.pendingJump === 'object' ? wd.pendingJump : null;
+      if (
+        pj &&
+        selectedConvOverride &&
+        pj.conversationId === selectedConvOverride &&
+        pj.cwd &&
+        doesWorkspaceMatchCwd(wsList, pj.cwd, pj.workspaceLabel || '')
+      ) {
+        pendingWorkspaceReconcile = false;
+        return false;
+      }
+
+      const prevOverride = selectedConvOverride;
+      const prevMismatch = workspaceMismatchNativeId;
+
+      if (workspaceMismatchNativeId && rawNativeId && workspaceMismatchNativeId === rawNativeId) {
+        const nativeSess = findWatchdogSessionById(rawNativeId, wd);
+        const checkCwd = nativeSess?.cwd || workspaceMismatchNativeCwd;
+        const checkLabel = nativeSess?.workspaceLabel || workspaceMismatchNativeWsLabel || '';
+        if (checkCwd && doesWorkspaceMatchCwd(wsList, checkCwd, checkLabel)) {
+          workspaceMismatchNativeId = '';
+          workspaceMismatchNativeCwd = '';
+          workspaceMismatchNativeWsLabel = '';
+        }
+      }
+
+      if (selectedConvOverride && workspaceChanged) {
+        const selSess = findWatchdogSessionById(selectedConvOverride, wd);
+        if (selSess && selSess.cwd && !doesWorkspaceMatchCwd(wsList, selSess.cwd, selSess.workspaceLabel || '')) {
+          selectedConvOverride = '';
+        }
+      }
+
+      if (rawNativeId && (!workspaceMismatchNativeId || workspaceMismatchNativeId !== rawNativeId)) {
+        const nativeSess = findWatchdogSessionById(rawNativeId, wd);
+        if (nativeSess && nativeSess.cwd && !doesWorkspaceMatchCwd(wsList, nativeSess.cwd, nativeSess.workspaceLabel || '')) {
+          workspaceMismatchNativeId = rawNativeId;
+          workspaceMismatchNativeCwd = nativeSess.cwd;
+          workspaceMismatchNativeWsLabel = nativeSess.workspaceLabel || '';
+        }
+      }
+
+      if (
+        workspaceMismatchNativeId &&
+        rawNativeId === workspaceMismatchNativeId &&
+        !selectedConvOverride
+      ) {
+        const uniqueMatch = pickUniqueWorkspacePrimarySession(wsList, wd);
+        if (uniqueMatch && uniqueMatch.conversationId !== rawNativeId) {
+          selectedConvOverride = uniqueMatch.conversationId;
+        }
+      }
+
+      const changed = selectedConvOverride !== prevOverride || workspaceMismatchNativeId !== prevMismatch;
+      if (changed || (Array.isArray(wd.sessions) && wd.sessions.length > 0)) {
+        pendingWorkspaceReconcile = false;
+      }
+      if (!changed) return false;
+
+      ++hostSwitchEpoch;
+      pendingCustomOverrideConvId = '';
+      windowCustomIntervalOpen = false;
+      sawOutOfOrderWatchdogAction = false;
+      lastObservedWatchdogIncidentKey = '';
+      resetManualWarmState();
+      resetHandoffDrawerTargetMode();
+      ++watchdogActionSeq;
+      ++searchRequestSeq;
+      clearHandoffSnapshot({ resetPreview: true, reloadIfOpen: handoffDrawerOpen });
+      resetPanelGuidanceState();
+      updateWatchdogIncidentButtons();
+      renderSessionSwitcher(wd);
+      if (triggerRefresh) {
+        refreshData(false, { queueIfInFlight: true });
+      }
+      return true;
+    }
+
+    function maybeAdvanceStandaloneFallbackConversation(wd) {
+      if (
+        window.sidecar ||
+        selectedConvOverride ||
+        getNativeHostConversationId() ||
+        !wd ||
+        wd.enabled === false ||
+        !Array.isArray(wd.sessions)
+      ) {
+        return false;
+      }
+      const primary = wd.sessions.filter((s) => s && !s.isSubagent && isValidSwitcherConvId(s.conversationId));
+      if (primary.length === 0) return false;
+      const active = primary
+        .filter((s) => s.phase && s.phase !== 'IDLE')
+        .sort((a, b) => (Number(b.lastActivityTs || 0) - Number(a.lastActivityTs || 0)));
+      const sortedAll = [...primary].sort(
+        (a, b) => (Number(b.lastActivityTs || 0) - Number(a.lastActivityTs || 0))
+      );
+      const best = active[0] || (Number(sortedAll[0]?.lastActivityTs || 0) > 0 ? sortedAll[0] : null);
+      if (!best || best.conversationId === inferredFallbackConvId) return false;
+      const curSess = inferredFallbackConvId
+        ? primary.find((s) => s.conversationId === inferredFallbackConvId) || null
+        : null;
+      const bestActive = Boolean(best.phase && best.phase !== 'IDLE');
+      const curActive = Boolean(curSess && curSess.phase && curSess.phase !== 'IDLE');
+      const bestTs = Number(best.lastActivityTs || 0);
+      const curTs = Number(curSess?.lastActivityTs || 0);
+      const shouldSwitch =
+        !inferredFallbackConvId ||
+        (bestActive && (!curActive || bestTs > curTs)) ||
+        (!curActive && bestTs > curTs);
+      if (!shouldSwitch) return false;
+      inferredFallbackConvId = best.conversationId;
+      ++hostSwitchEpoch;
+      ++watchdogActionSeq;
+      ++searchRequestSeq;
+      lastObservedWatchdogIncidentKey = '';
+      resetManualWarmState();
+      resetHandoffDrawerTargetMode();
+      clearHandoffSnapshot({ resetPreview: true, reloadIfOpen: handoffDrawerOpen });
+      resetPanelGuidanceState();
+      updateWatchdogIncidentButtons();
+      renderSessionSwitcher(wd);
+      queueMicrotask(() => refreshData(false, { queueIfInFlight: true }));
+      return true;
+    }
+
     async function resolveHostWorkspacePaths() {
       if (!window.sidecar || typeof window.sidecar.getWorkspaceUris !== 'function') {
         return [];
@@ -364,9 +548,30 @@
           try {
             window.sidecar.onWorkspaceChange((uris) => {
               if (Array.isArray(uris)) {
-                cachedHostWorkspacePaths = uris.map(decodeWorkspaceUriClient).filter(Boolean);
+                const myWsSeq = ++wsChangeSeq;
+                const nextPaths = uris.map(decodeWorkspaceUriClient).filter(Boolean);
+                const prevKey = lastNotifiedWorkspaceKey;
+                const nextKey = Array.from(new Set(nextPaths)).sort().join('|');
+                cachedHostWorkspacePaths = nextPaths;
+                if (nextKey) lastNotifiedWorkspaceKey = nextKey;
+                const workspaceChanged = Boolean(nextKey && prevKey && prevKey !== nextKey);
+                if (workspaceChanged) {
+                  pendingWorkspaceReconcile = true;
+                }
+                const runReconcile = () => {
+                  if (myWsSeq !== wsChangeSeq) return;
+                  const livePaths = Array.isArray(cachedHostWorkspacePaths) ? cachedHostWorkspacePaths : [];
+                  if (livePaths.length > 0 && (workspaceChanged || pendingWorkspaceReconcile || !selectedConvOverride)) {
+                    reconcileActiveConversationWithWorkspace(livePaths, {
+                      triggerRefresh: true,
+                      workspaceChanged
+                    });
+                  }
+                };
                 if (cachedWatchdog && cachedWatchdog.pendingJump) {
-                  consumePendingJumpIfEligible(cachedWatchdog);
+                  Promise.resolve(consumePendingJumpIfEligible(cachedWatchdog)).then(runReconcile, runReconcile);
+                } else {
+                  runReconcile();
                 }
               }
             });
@@ -381,8 +586,22 @@
         const urisPromise = Promise.resolve(window.sidecar.getWorkspaceUris()).then(
           (uris) => {
             const decoded = Array.isArray(uris) ? uris.map(decodeWorkspaceUriClient).filter(Boolean) : [];
-            cachedHostWorkspacePaths = decoded;
-            return { timedOut: false, decoded };
+            if (!Array.isArray(cachedHostWorkspacePaths)) {
+              cachedHostWorkspacePaths = decoded;
+            }
+            const decodedKey = Array.from(new Set(decoded)).sort().join('|');
+            if (decodedKey && !lastNotifiedWorkspaceKey) {
+              lastNotifiedWorkspaceKey = decodedKey;
+            }
+            const livePaths = Array.isArray(cachedHostWorkspacePaths) ? cachedHostWorkspacePaths : decoded;
+            if (cachedWatchdog && livePaths.length > 0 && (pendingWorkspaceReconcile || !selectedConvOverride)) {
+              reconcileActiveConversationWithWorkspace(livePaths, {
+                triggerRefresh: true,
+                wd: cachedWatchdog,
+                workspaceChanged: pendingWorkspaceReconcile
+              });
+            }
+            return { timedOut: false, decoded: livePaths };
           },
           () => ({ timedOut: true, decoded: [] })
         );
@@ -1607,9 +1826,15 @@
 
     let autoRefreshInFlight = false;
     let autoRefreshPromise = null;
+    let pendingFollowUpAutoRefresh = false;
 
-    function refreshData(manual = false) {
-      if (!manual && autoRefreshInFlight && autoRefreshPromise) return autoRefreshPromise;
+    function refreshData(manual = false, { queueIfInFlight = false } = {}) {
+      if (!manual && autoRefreshInFlight && autoRefreshPromise) {
+        if (queueIfInFlight) {
+          pendingFollowUpAutoRefresh = true;
+        }
+        return autoRefreshPromise;
+      }
       if (!manual) autoRefreshInFlight = true;
       let followUpAutoRefresh = false;
       const run = executeRefreshData(manual, () => {
@@ -1619,7 +1844,8 @@
           autoRefreshInFlight = false;
           if (autoRefreshPromise === run) autoRefreshPromise = null;
         }
-        if (followUpAutoRefresh) {
+        if (followUpAutoRefresh || pendingFollowUpAutoRefresh) {
+          pendingFollowUpAutoRefresh = false;
           queueMicrotask(() => refreshData(false));
         }
       });
@@ -1661,7 +1887,7 @@
           : scopeBody;
 
         const [statsRes, docRes, kvRes, wdRes, resumeRes] = await Promise.all([
-          apiFetch('/api/stats', { method: 'POST', body: scopeBody }),
+          apiFetch('/api/stats', { method: 'POST', body: kaScopeBody }),
           apiFetch('/api/doctor', { method: 'POST', body: '{}' }).catch(() => null),
           apiFetch('/api/cache-diag', { method: 'POST', body: kaScopeBody }).catch(() => null),
           apiFetch('/api/watchdog', { method: 'POST', body: kaScopeBody }).catch(() => null),
@@ -3542,8 +3768,9 @@
       const previewEl = document.getElementById('kv-handoff-preview');
       const metaEl = document.getElementById('kv-handoff-meta');
       // Sync native conversation transition BEFORE incrementing handoffFetchSeq to avoid re-entrant double fetch
-      const nativeId = syncNativeHostConversation({ reloadIfOpen: false });
-      const activeConv = selectedConvOverride || nativeId || (!window.sidecar ? inferredFallbackConvId : '');
+      syncNativeHostConversation({ reloadIfOpen: false });
+      const effectiveNativeId = getEffectiveNativeConversationId();
+      const activeConv = selectedConvOverride || effectiveNativeId || (!window.sidecar ? inferredFallbackConvId : '');
       const reqScope = currentScope;
       const reqHostEpoch = hostSwitchEpoch;
       let reqStallConvId = '';
@@ -4163,11 +4390,17 @@
       renderPanelGuidance(null, null);
     }
 
+    function stripCheckDurationSuffixClient(raw) {
+      const collapsed = String(raw || '').replace(/\s+/g, ' ').trim();
+      if (!collapsed) return '';
+      return collapsed.replace(/\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\)$/i, '').trim();
+    }
+
     function formatPassedCheckDisplayName(rec) {
       if (!rec || typeof rec !== 'object') return '';
       if (Array.isArray(rec.batchNames) && rec.batchNames.length > 1) {
         const cleanBatch = rec.batchNames
-          .map((n) => String(n || '').replace(/\s+/g, ' ').trim())
+          .map((n) => stripCheckDurationSuffixClient(n))
           .filter((n) => n && !/^(?:check|checks|verify|run_checks)$/i.test(n));
         if (cleanBatch.length > 0) {
           const sep = currentLang === 'zh' ? '、' : ', ';
@@ -4176,7 +4409,7 @@
           return label.length > 64 ? `${label.slice(0, 61)}...` : label;
         }
       }
-      const raw = String(rec.name || rec.command || '').replace(/\s+/g, ' ').trim();
+      const raw = stripCheckDurationSuffixClient(rec.name || rec.command || '');
       if (!raw || /^(?:check|checks|verify|run_checks)$/i.test(raw)) return '';
       return raw.length > 64 ? `${raw.slice(0, 61)}...` : raw;
     }
@@ -4197,7 +4430,7 @@
           outcome: 'fail',
           kind: pfKind,
           checkKey: pf.checkKey || '',
-          name: pfMissing && !pf.command ? (pfSummary || 'run_checks') : (pf.name || pf.command || (pfKind === 'build' ? 'build' : 'test')),
+          name: pfMissing && !pf.command ? (pfSummary || 'run_checks') : (stripCheckDurationSuffixClient(pf.name || '') || pf.command || (pfKind === 'build' ? 'build' : 'test')),
           command: pf.command || '',
           exitCode: pfMissing ? null : (pf.exitCode ?? 1),
           firstErrorLine: pf.firstErrorLine || '',
@@ -4385,7 +4618,7 @@
               : t('guidanceFailManyRounds', { n: oscCount });
           }
         } else {
-          const checkName = latestRealFailure?.name || latestCheck?.name || '';
+          const checkName = stripCheckDurationSuffixClient(latestRealFailure?.name || latestCheck?.name || '');
           if (latestCheck && latestCheck.outcome === 'pass' && checkName) {
             text = t('guidanceFailUnresolvedCheck', { name: checkName });
           } else {
@@ -5296,7 +5529,37 @@
       const tipsList = document.getElementById('wd-tips-list');
       const otherAlerts = document.getElementById('wd-other-alerts');
 
-      consumePendingJumpIfEligible(wd);
+      const runPostJumpWorkspaceReconcile = () => {
+        if (
+          preserveEpoch ||
+          !window.sidecar ||
+          !Array.isArray(cachedHostWorkspacePaths) ||
+          cachedHostWorkspacePaths.length === 0 ||
+          (!pendingWorkspaceReconcile && selectedConvOverride)
+        ) {
+          return false;
+        }
+        return reconcileActiveConversationWithWorkspace(cachedHostWorkspacePaths, {
+          triggerRefresh: true,
+          wd,
+          workspaceChanged: pendingWorkspaceReconcile
+        });
+      };
+      if (wd.pendingJump && !preserveEpoch) {
+        const myEpochAtJump = hostSwitchEpoch;
+        Promise.resolve(consumePendingJumpIfEligible(wd)).then(() => {
+          if (cachedWatchdog !== wd || hostSwitchEpoch !== myEpochAtJump) return;
+          runPostJumpWorkspaceReconcile();
+        });
+      } else {
+        consumePendingJumpIfEligible(wd);
+        if (runPostJumpWorkspaceReconcile()) {
+          return;
+        }
+      }
+      if (!preserveEpoch && maybeAdvanceStandaloneFallbackConversation(wd)) {
+        return;
+      }
 
       updateFeaturePill('wd-enable-btn', t('wdEnableLabel'), wd.enabled !== false);
       updateFeaturePill('wd-notify-btn', t('wdNotifyLabel'), wd.desktopNotifyEnabled === true);
@@ -5696,9 +5959,15 @@
           rememberBoundedId(consumedJumpIds, opts.jumpId);
         }
         const nextOverride = targetId === nativeId ? '' : targetId;
-        const convChanged = selectedConvOverride !== nextOverride;
+        const clearedMismatch = Boolean(targetId === nativeId && workspaceMismatchNativeId === nativeId);
+        const convChanged = selectedConvOverride !== nextOverride || clearedMismatch;
         const scopeChanged = currentScope !== 'conversation';
         selectedConvOverride = nextOverride;
+        if (clearedMismatch) {
+          workspaceMismatchNativeId = '';
+          workspaceMismatchNativeCwd = '';
+          workspaceMismatchNativeWsLabel = '';
+        }
         pendingCustomOverrideConvId = '';
         sawOutOfOrderWatchdogAction = false;
         ++watchdogActionSeq;
@@ -5707,6 +5976,7 @@
           applyScopeSelection('conversation');
         }
         if (convChanged || scopeChanged) {
+          ++refreshSeq;
           lastObservedWatchdogIncidentKey = '';
           resetManualWarmState();
           resetHandoffDrawerTargetMode();
@@ -5723,7 +5993,7 @@
         }
         await ackPromise;
         if (myJumpSeq === jumpActionSeq) {
-          refreshData(false);
+          refreshData(false, { queueIfInFlight: true });
         }
         return { ok: true, conversationId: targetId, fromPendingJump: true };
       }
@@ -5747,9 +6017,15 @@
       }
       if (!crossWorkspaceConfirmed && myJumpSeq === jumpActionSeq) {
         const nextOverride = targetId === nativeId ? '' : targetId;
-        const convChanged = selectedConvOverride !== nextOverride;
+        const clearedMismatch = Boolean(targetId === nativeId && workspaceMismatchNativeId === nativeId);
+        const convChanged = selectedConvOverride !== nextOverride || clearedMismatch;
         const scopeChanged = currentScope !== 'conversation';
         selectedConvOverride = nextOverride;
+        if (clearedMismatch) {
+          workspaceMismatchNativeId = '';
+          workspaceMismatchNativeCwd = '';
+          workspaceMismatchNativeWsLabel = '';
+        }
         pendingCustomOverrideConvId = '';
         sawOutOfOrderWatchdogAction = false;
         ++watchdogActionSeq;
@@ -5758,6 +6034,7 @@
           applyScopeSelection('conversation');
         }
         if (convChanged || scopeChanged) {
+          ++refreshSeq;
           lastObservedWatchdogIncidentKey = '';
           resetManualWarmState();
           resetHandoffDrawerTargetMode();
@@ -5808,7 +6085,7 @@
       }
 
       if (myJumpSeq === jumpActionSeq) {
-        refreshData(false);
+        refreshData(false, { queueIfInFlight: true });
       }
       return { ok: true, conversationId: targetId };
     }
@@ -5831,13 +6108,20 @@
           rememberBoundedId(consumedJumpIds, pj.jumpId);
           const nativeId = getNativeHostConversationId();
           const nextOverride = pj.conversationId === nativeId ? '' : pj.conversationId;
-          const changedConv = selectedConvOverride !== nextOverride;
+          const clearedMismatch = Boolean(pj.conversationId === nativeId && workspaceMismatchNativeId === nativeId);
+          const changedConv = selectedConvOverride !== nextOverride || clearedMismatch;
           const changedScope = currentScope !== 'conversation';
           if (changedScope) {
             applyScopeSelection('conversation');
           }
           if (changedConv || changedScope) {
             selectedConvOverride = nextOverride;
+            if (clearedMismatch) {
+              workspaceMismatchNativeId = '';
+              workspaceMismatchNativeCwd = '';
+              workspaceMismatchNativeWsLabel = '';
+            }
+            ++refreshSeq;
             lastObservedWatchdogIncidentKey = '';
             resetManualWarmState();
             resetHandoffDrawerTargetMode();
@@ -5848,7 +6132,7 @@
           }
           await ackPendingJumpOnServer(pj.jumpId);
           if (changedConv || changedScope) {
-            refreshData(false);
+            refreshData(false, { queueIfInFlight: true });
           }
         }
         return false;
@@ -5972,12 +6256,13 @@
 
     async function copyWatchdogRescueBrief() {
       const btn = document.getElementById('wd-copy-rescue-btn');
-      const nativeId = syncNativeHostConversation({ reloadIfOpen: false });
+      syncNativeHostConversation({ reloadIfOpen: false });
       updateWatchdogIncidentButtons();
       if (!isWatchdogIncidentAlignedWithTarget()) {
         return;
       }
-      const activeConv = selectedConvOverride || nativeId || (!window.sidecar ? inferredFallbackConvId : '');
+      const effectiveNativeId = getEffectiveNativeConversationId();
+      const activeConv = selectedConvOverride || effectiveNativeId || (!window.sidecar ? inferredFallbackConvId : '');
       const rescue = getMatchingRescueBrief();
       const reqIncidentKey = getCurrentWatchdogIncidentKey();
       const reqHostEpoch = hostSwitchEpoch;

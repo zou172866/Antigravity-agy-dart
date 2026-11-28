@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.4/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.4/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.3 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.4 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.10.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,11 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.10.4
+- **修复检查引导栏长期卡红与耗时后缀污染**：在 `cache-analyzer.js`、`hooks/post-tool-use.mjs`、`checkpoints.js` 与 Sidecar 前端全链路统一剥离 `outputMode: "full"` 块名末尾的耗时后缀（如 `(136ms)` / `(1.2s)`，保留 `(v2)` 等非耗时括号），彻底解决重跑耗时变化后故障键无法消解的问题。
+- **过滤 `run_checks` 临时只读探测 & 支持复合 `&&` 与 PowerShell 5.1 失败即停链消解**：不再让纯只读信息查看与临时探测命令（如 `git status/show/log/remote -v/tag -l` 及串联内联探测）永久卡死在未解故障中，同时严格保留真校验工具（`agy plugin validate`、`node --check`、`npm run doctor`、`git diff --exit-code/--check`、写型 `git tag`/`branch`、管道下游/`xargs` 校验及正则过滤报错）；复合 `&&` 与 Windows PowerShell 5.1 失败即停链（`if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` / `if ($LASTEXITCODE -eq 0) { ... }`）通过时准确消解已过子句，阻断 `exit 0`/裸 `exit`/`||`/无护栏分号与过滤管道绕过，并修复 checkpoint 140 字符截断破坏长命令 `checkKey` 的问题。
+- **修复 Sidecar 跨窗口/跨工作区粘滞绑定与匿名工作区 Checkpoint 积灰**：`getNativeHostConversationId()` 优先读取 URL 参数，监听 `onWorkspaceChange` 与冷启动工作区路径变化自动解绑或跟随新工作区主会话，补齐 `/api/stats` 未绑定隔离、状态切换刷新排队及独立模式自动跟随；`resolveUniqueActivePrimarySessionForWorkspace` 支持子目录回落唯一活跃父工作区（同时阻断子代理跨根会话竞争与浅层系统目录误匹配）；匿名 `workspace:*` checkpoint 陈旧故障与 `previousFailure` 新增 6 小时自动过期清理。
 
 ### v1.10.3
 - **轻量 CLI 扣额归因与 `#1890` 4× 哨兵（`node bin/agy-dart.mjs audit quota` / `npm run quota:audit`，仅 devtools，零 Turn-0 开销）**：离线同窗拆清三本账——（1）`#1890` 自定义 Agent 4× 调用及传递后代谱系越界检测（对齐官方 1× 内置与 `/boost` Worker 白名单 + 磁盘 `agents/*.md` 扫描）；（2）复用 `#1886` 后台安全审查归因；（3）全机多会话 1× 等效美元按 Antigravity 周额度池分桶（`gemini` vs `claude-gpt`，含 `CHECKPOINT` 模型继承）、双池打点（`--mark-gemini` / `--mark-claude-gpt`）及分池持久化个人 1× 基线定标（`--calibrate-baseline` / `--set-baseline-gemini` / `--set-baseline-claude-gpt`），消除跨档位/跨池硬编码 `$6/1%` 误报与漏报。

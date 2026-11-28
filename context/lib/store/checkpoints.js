@@ -8,6 +8,14 @@ import {
 const MAX_FAILURE_EXCERPT_LINES = 5;
 const MAX_FAILURE_EXCERPT_BYTES = 500;
 const MAX_CHECKPOINT_UNRESOLVED = 5;
+const WORKSPACE_CHECKPOINT_FAILURE_TTL_MS = 6 * 60 * 60 * 1000;
+const CHECK_DURATION_SUFFIX_RE = /\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\)$/i;
+
+export function stripCheckDurationSuffix(name = "") {
+  const collapsed = String(name || "").replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  return collapsed.replace(CHECK_DURATION_SUFFIX_RE, "").trim();
+}
 
 const CHECK_BUILD_KIND_RE =
   /\b(?:build|bundle|compile|tsc|vue-tsc|svelte-check|typecheck|type-check|lint|eslint|oxlint|biome|ruff|flake8|mypy|pyright|basedpyright|pylint|stylelint|shellcheck|clippy|vet|webpack|rollup|tsup|esbuild|vite\s+build|electron-vite\s+build|next\s+build|nuxt\s+build|astro\s+build|cargo\s+(?:build|check|clippy)|go\s+(?:build|vet)|dotnet\s+build|gradle\s+build|mvn\s+(?:compile|package))\b/i;
@@ -22,7 +30,18 @@ const CHECK_PURE_SETUP_RE =
   /^(?:(?:cd|chdir|pushd|set-location|push-location|sl)(?:\s|$)|export\s+[a-z_][a-z0-9_]*=|set\s+(?:"[a-z_][a-z0-9_]*=|[a-z_][a-z0-9_]*=)|\$env:[a-z0-9_]+\s*=|[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+))*$)/i;
 
 const CHECK_READ_ONLY_HEAD_RE =
-  /^(?:git(?:\.exe)?\s+(?:(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|--no-pager|-c\s+(?:"[^"]*"|'[^']*'|\S+))\s+)*(?:diff|status|log|show|branch|rev-parse|ls-files|grep|blame|shortlog|describe|tag|reflog|ls-tree|cat-file|check-ignore|for-each-ref)|(?:cat|head|tail|less|more|ls|dir|echo|printf|pwd|which|where|type|rg|ripgrep|grep|egrep|fgrep|select-string|sls|findstr|get-content|get-childitem|get-location|get-item|gc|gci|gl|stat|wc|file|tree|find|write-output|write-host|format-table|select-object|measure-object|sort-object|test-path|resolve-path|true)(?:\.exe)?)(?:\s|$)/i;
+  /^(?:git(?:\.exe)?\s+(?:(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|--no-pager|-c\s+(?:"[^"]*"|'[^']*'|\S+))\s+)*(?:diff|status|log|show|branch|rev-parse|ls-files|grep|blame|shortlog|describe|tag|reflog|ls-tree|cat-file|check-ignore|for-each-ref|remote(?!\s+(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b))|(?:cat|head|tail|less|more|ls|dir|echo|printf|pwd|which|where|type|rg|ripgrep|grep|egrep|fgrep|select-string|sls|findstr|get-content|get-childitem|get-location|get-item|gc|gci|gl|stat|wc|file|tree|find|write-output|write-host|format-table|select-object|measure-object|sort-object|test-path|resolve-path|true)(?:\.exe)?)(?:\s|$)/i;
+
+const CHECK_PS_FAILFAST_ABORT_RE =
+  /^if\s*\(\s*(?:\$lastexitcode\s+-ne\s+0|-not\s+\$\?)\s*\)\s*\{\s*(?:exit\s+(?:\$lastexitcode|[1-9]\d*)|throw\b[^}]*)\s*;?\s*\}$/i;
+
+const CHECK_PS_IF_PREV_OK_RE =
+  /^if\s*\(\s*(?:\$lastexitcode\s+-eq\s+0|\$\?)\s*\)\s*\{([\s\S]+)\}$/i;
+
+const CHECK_FILTER_STAGE_RE =
+  /^(?:grep|egrep|fgrep|rg|ripgrep|select-string|sls|findstr)(?:\.exe)?(?:\s|$)/i;
+
+const CHECK_KEY_EMBEDDED_DURATION_RE = /\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\)(?=\||,|$)/i;
 
 const GENERIC_CHECK_NAMES = new Set([
   "test",
@@ -137,7 +156,7 @@ export function classifyCheckKind(name = "", cmd = "") {
 }
 
 export function formatCheckDisplayName(name = "", cmd = "") {
-  const cleanName = String(name || "").replace(/\s+/g, " ").trim();
+  const cleanName = stripCheckDurationSuffix(name);
   if (cleanName) return cleanName.slice(0, 80);
   const cleanCmd = String(cmd || "").replace(/\s+/g, " ").trim();
   if (cleanCmd) return cleanCmd.slice(0, 80);
@@ -260,37 +279,130 @@ function unwrapSimpleShellWrapper(clause = "") {
   return payload;
 }
 
-function extractPrimaryStageFromCommand(command = "", depth = 0) {
-  const cleanCmd = String(command || "").trim().replace(/^["'](.*)["']$/, "$1").trim();
-  if (!cleanCmd) return "";
-  const semiParts = splitSimpleOutsideQuotes(cleanCmd, (s, i) => (s[i] === ";" ? 1 : 0));
-  const lastSeg = semiParts[semiParts.length - 1] || cleanCmd;
-  const clauses = splitSimpleOutsideQuotes(lastSeg, (s, i) =>
-    (s[i] === "&" && s[i + 1] === "&") || (s[i] === "|" && s[i + 1] === "|") ? 2 : 0
+function checkClauseHasFilterStage(clause) {
+  const trimmed = String(clause || "").trim();
+  if (!trimmed) return false;
+  const stages = splitSimpleOutsideQuotes(trimmed, (s, i) =>
+    s[i] === "|" && s[i + 1] !== "|" && s[i - 1] !== "|" ? 1 : 0
   );
-  for (let idx = clauses.length - 1; idx >= 0; idx--) {
-    const clause = clauses[idx];
-    if (!clause || CHECK_PURE_SETUP_RE.test(clause)) continue;
-    if (depth < 2) {
-      const unwrapped = unwrapSimpleShellWrapper(clause);
-      if (unwrapped) {
-        const innerStage = extractPrimaryStageFromCommand(unwrapped, depth + 1);
-        if (innerStage) return innerStage;
+  for (const rawStage of stages) {
+    const cleaned = rawStage
+      .replace(/\b2>&1\b/g, "")
+      .replace(/\b2>(?:\/dev\/null|\$null|nul)\b/gi, "")
+      .trim();
+    const norm = normalizeCheckStageHead(cleaned);
+    if (norm && CHECK_FILTER_STAGE_RE.test(norm)) return true;
+  }
+  return false;
+}
+
+function collectCommandCandidateStages(command = "", depth = 0, { skipFilterStages = false } = {}) {
+  const cleanCmd = String(command || "").trim().replace(/^["'](.*)["']$/, "$1").trim();
+  if (!cleanCmd) return { stages: [], hasOrOp: false, sawFiltered: false };
+  const semiParts = splitSimpleOutsideQuotes(cleanCmd, (s, i) => (s[i] === ";" ? 1 : 0));
+  const selectedSegs = [];
+  let segIdx = semiParts.length - 1;
+  while (segIdx >= 0) {
+    const rawSeg = (semiParts[segIdx] || "").trim();
+    if (!rawSeg) {
+      segIdx -= 1;
+      continue;
+    }
+    if (CHECK_PS_FAILFAST_ABORT_RE.test(rawSeg)) {
+      segIdx -= 1;
+      continue;
+    }
+    const okMatch = rawSeg.match(CHECK_PS_IF_PREV_OK_RE);
+    if (okMatch) {
+      selectedSegs.unshift({ unwrappedFromOk: okMatch[1].trim() });
+      segIdx -= 1;
+      continue;
+    }
+    selectedSegs.unshift({ raw: rawSeg });
+    if (segIdx > 0) {
+      const prevSeg = (semiParts[segIdx - 1] || "").trim();
+      if (prevSeg && CHECK_PS_FAILFAST_ABORT_RE.test(prevSeg)) {
+        segIdx -= 1;
+        continue;
       }
     }
-    const stages = splitSimpleOutsideQuotes(clause, (s, i) =>
-      s[i] === "|" && s[i + 1] !== "|" && s[i - 1] !== "|" ? 1 : 0
-    );
-    if (stages.length === 0) continue;
-    const stage0 = stages[0]
-      .replace(/\b2>&1\b/g, "")
-      .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
-      .trim();
-    const normHead = normalizeCheckStageHead(stage0);
-    if (CHECK_READ_ONLY_HEAD_RE.test(normHead)) continue;
-    return normHead;
+    break;
   }
-  return "";
+
+  let hasOrOp = false;
+  let sawFiltered = false;
+  const out = [];
+  const processRawSeg = (seg) => {
+    let inS = false;
+    let inD = false;
+    for (let i = 0; i < seg.length - 1; i++) {
+      const c = seg[i];
+      if (inS) { if (c === "'") inS = false; continue; }
+      if (inD) { if (c === "\\") { i++; continue; } if (c === '"') inD = false; continue; }
+      if (c === "'") { inS = true; continue; }
+      if (c === '"') { inD = true; continue; }
+      if (c === "|" && seg[i + 1] === "|") hasOrOp = true;
+    }
+    const clauses = splitSimpleOutsideQuotes(seg, (s, i) =>
+      (s[i] === "&" && s[i + 1] === "&") || (s[i] === "|" && s[i + 1] === "|") ? 2 : 0
+    );
+    const local = [];
+    for (let idx = clauses.length - 1; idx >= 0; idx--) {
+      const clause = clauses[idx];
+      if (!clause || CHECK_PURE_SETUP_RE.test(clause)) continue;
+      if (depth < 2) {
+        const unwrapped = unwrapSimpleShellWrapper(clause);
+        if (unwrapped) {
+          const inner = collectCommandCandidateStages(unwrapped, depth + 1, { skipFilterStages });
+          if (inner.hasOrOp) hasOrOp = true;
+          if (inner.sawFiltered) sawFiltered = true;
+          if (inner.stages.length > 0) {
+            local.push(...inner.stages);
+            continue;
+          }
+        }
+      }
+      if (checkClauseHasFilterStage(clause)) {
+        sawFiltered = true;
+        if (skipFilterStages) continue;
+      }
+      const stages = splitSimpleOutsideQuotes(clause, (s, i) =>
+        s[i] === "|" && s[i + 1] !== "|" && s[i - 1] !== "|" ? 1 : 0
+      );
+      if (stages.length === 0) continue;
+      const stage0 = stages[0]
+        .replace(/\b2>&1\b/g, "")
+        .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
+        .trim();
+      const normHead = normalizeCheckStageHead(stage0);
+      if (!normHead || CHECK_READ_ONLY_HEAD_RE.test(normHead)) continue;
+      local.push(normHead);
+    }
+    return local;
+  };
+
+  for (let i = selectedSegs.length - 1; i >= 0; i--) {
+    const item = selectedSegs[i];
+    if (item.unwrappedFromOk) {
+      const inner = collectCommandCandidateStages(item.unwrappedFromOk, depth + 1, { skipFilterStages });
+      if (inner.hasOrOp) hasOrOp = true;
+      if (inner.sawFiltered) sawFiltered = true;
+      out.push(...inner.stages);
+    } else {
+      out.push(...processRawSeg(item.raw));
+    }
+  }
+  return { stages: out, hasOrOp, sawFiltered };
+}
+
+function extractPrimaryStageFromCommand(command = "", preferredKind = "", depth = 0) {
+  const { stages } = collectCommandCandidateStages(command, depth);
+  if (stages.length === 0) return "";
+  if (stages.length > 1 && (preferredKind === "test" || preferredKind === "build")) {
+    const matched = stages.find((st) => classifyCheckKind("", st) === preferredKind);
+    if (matched) return matched;
+  }
+  return stages[0];
 }
 
 function normalizeCheckTargetToken(raw = "") {
@@ -355,7 +467,7 @@ export function extractCheckIdentity(
     };
   }
   const cleanCmd = String(command || "").trim();
-  const primaryStage = precomputedStage || extractPrimaryStageFromCommand(cleanCmd);
+  const primaryStage = precomputedStage || extractPrimaryStageFromCommand(cleanCmd, safeKind);
 
   let tool = "";
   let pathTargets = [];
@@ -618,7 +730,7 @@ export function extractCheckIdentity(
     }
   }
 
-  const cleanName = String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const cleanName = stripCheckDurationSuffix(name).toLowerCase();
   if (!tool) {
     if (cleanName && !GENERIC_CHECK_NAMES.has(cleanName)) {
       tool = "named";
@@ -749,12 +861,45 @@ export function doesPassResolveFailure(passId, failId) {
   return true;
 }
 
+export function extractCompoundPassIdentities(kind = "check", name = "", command = "") {
+  const cleanCmd = String(command || "").trim();
+  if (cleanCmd) {
+    const { stages, hasOrOp, sawFiltered } = collectCommandCandidateStages(cleanCmd, 0, {
+      skipFilterStages: true
+    });
+    if (hasOrOp) return [];
+    if (stages.length === 0 && sawFiltered) return [];
+    const byKey = new Map();
+    if (stages.length === 1) {
+      const singleId = extractCheckIdentity(kind, name, stages[0], { primaryStage: stages[0] });
+      if (singleId && !singleId.isMissingSummary) byKey.set(singleId.checkKey, singleId);
+      return Array.from(byKey.values());
+    }
+    if (!sawFiltered) {
+      const primary = extractCheckIdentity(kind, name, cleanCmd);
+      if (primary && !primary.isMissingSummary) {
+        byKey.set(primary.checkKey, primary);
+      }
+    }
+    for (const stage of stages) {
+      const clauseKind = classifyCheckKind("", stage);
+      const clauseId = extractCheckIdentity(clauseKind, "", stage, { primaryStage: stage });
+      if (clauseId && !clauseId.isMissingSummary && !byKey.has(clauseId.checkKey)) {
+        byKey.set(clauseId.checkKey, clauseId);
+      }
+    }
+    return Array.from(byKey.values());
+  }
+  const primary = extractCheckIdentity(kind, name, command);
+  return primary && !primary.isMissingSummary ? [primary] : [];
+}
+
 export function extractBatchCheckIdentities(commands = [], blockResults = []) {
   const byKey = new Map();
   const batchCommands = [];
   const seenCmdKey = new Set();
   const addEntry = (rawName, rawCmd) => {
-    const name = String(rawName || "").replace(/\s+/g, " ").trim();
+    const name = stripCheckDurationSuffix(rawName);
     const command = String(rawCmd || "").replace(/\s+/g, " ").trim();
     if (!name && !command) return;
     const kind = classifyCheckKind(name, command);
@@ -835,27 +980,38 @@ export function doesBatchPassResolveMissingFailure(passBatchIds = [], failSlot =
 
 function toCompactCheckpointFailure(entry, fallbackKind = "test") {
   if (!entry || typeof entry !== "object") return null;
-  const cmd = String(entry.command || "").trim().slice(0, 140);
-  const name = String(entry.name || cmd || (fallbackKind === "build" ? "build" : "test")).trim().slice(0, 80);
+  const fullCmd = String(entry.command || "").trim();
+  const cmd = fullCmd.slice(0, 512);
+  const rawName = stripCheckDurationSuffix(entry.name || "");
+  const name = (rawName || cmd || (fallbackKind === "build" ? "build" : "test")).trim().slice(0, 80);
   const missingDetails = Boolean(entry.missingDetails);
   const kind = entry.kind || fallbackKind || "test";
   const batchKeys = Array.isArray(entry.batchKeys)
-    ? Array.from(new Set(entry.batchKeys.map((k) => String(k || "").trim()).filter(Boolean))).sort().slice(0, 12)
+    ? Array.from(
+        new Set(
+          entry.batchKeys
+            .map((k) => String(k || "").trim().replace(/\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\)(?=\||,|$)/gi, ""))
+            .filter(Boolean)
+        )
+      )
+        .sort()
+        .slice(0, 12)
     : [];
   const batchCommands = Array.isArray(entry.batchCommands)
     ? entry.batchCommands
         .map((c) => ({
-          name: String(c?.name || "").trim().slice(0, 60),
-          command: String(c?.command || "").trim().slice(0, 120)
+          name: stripCheckDurationSuffix(c?.name || "").slice(0, 60),
+          command: String(c?.command || "").trim().slice(0, 200)
         }))
         .filter((c) => c.name || c.command)
         .slice(0, 10)
     : [];
   const batchTotalCount = Math.max(0, Number(entry.batchTotalCount || 0));
+  const rawCheckKey = typeof entry.checkKey === "string" ? entry.checkKey.trim() : "";
   const checkKey =
-    typeof entry.checkKey === "string" && entry.checkKey.trim()
-      ? entry.checkKey.trim()
-      : extractCheckIdentity(kind, name, cmd, { missingDetails, batchKeys }).checkKey;
+    rawCheckKey && !CHECK_KEY_EMBEDDED_DURATION_RE.test(rawCheckKey)
+      ? rawCheckKey
+      : extractCheckIdentity(kind, name, fullCmd || cmd, { missingDetails, batchKeys }).checkKey;
   return {
     command: cmd,
     name,
@@ -873,23 +1029,58 @@ function toCompactCheckpointFailure(entry, fallbackKind = "test") {
   };
 }
 
-function extractPriorUnresolvedFailures(prev, fallbackKind = "test") {
+function isWorkspaceTimestampExpired(rawAt, nowMs = Date.now(), fallbackAt = null) {
+  const effectiveAt = rawAt || fallbackAt;
+  if (!effectiveAt) return false;
+  const ts = Date.parse(effectiveAt);
+  if (!Number.isFinite(ts)) return false;
+  return nowMs - ts > WORKSPACE_CHECKPOINT_FAILURE_TTL_MS;
+}
+
+function pruneWorkspaceUnresolvedFailures(items = [], nowMs = Date.now(), fallbackAt = null) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  return items.filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    return !isWorkspaceTimestampExpired(item.at, nowMs, fallbackAt);
+  });
+}
+
+function expandPassIdentitiesFromList(entries = [], fallbackIds = []) {
+  const byKey = new Map();
+  for (const id of fallbackIds) {
+    if (id && !id.isMissingSummary) byKey.set(id.checkKey, id);
+  }
+  for (const entry of entries) {
+    if (!entry) continue;
+    const name = stripCheckDurationSuffix(entry.name || "");
+    const cmd = String(entry.command || entry.cmd || "").trim();
+    if (!name && !cmd) continue;
+    const kind = classifyCheckKind(name, cmd);
+    for (const pid of extractCompoundPassIdentities(kind, name, cmd)) {
+      if (pid && !pid.isMissingSummary && !byKey.has(pid.checkKey)) {
+        byKey.set(pid.checkKey, pid);
+      }
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function extractPriorUnresolvedFailures(prev, fallbackKind = "test", { isWorkspaceAnon = false, nowMs = Date.now() } = {}) {
   if (!prev || typeof prev !== "object") return [];
+  let out = [];
   if (Array.isArray(prev.unresolvedFailures) && prev.unresolvedFailures.length > 0) {
-    return prev.unresolvedFailures
+    out = prev.unresolvedFailures
       .map((item) => toCompactCheckpointFailure(item, fallbackKind))
       .filter(Boolean)
       .slice(0, MAX_CHECKPOINT_UNRESOLVED);
-  }
-  if (!prev.ok && prev.outcome !== "timeout" && !prev.timedOut) {
+  } else if (!prev.ok && prev.outcome !== "timeout" && !prev.timedOut) {
     const one = toCompactCheckpointFailure(prev, fallbackKind);
-    return one ? [one] : [];
-  }
-  if (prev.previousFailure && typeof prev.previousFailure === "object") {
+    out = one ? [one] : [];
+  } else if (prev.previousFailure && typeof prev.previousFailure === "object") {
     const one = toCompactCheckpointFailure(prev.previousFailure, fallbackKind);
-    return one ? [one] : [];
+    out = one ? [one] : [];
   }
-  return [];
+  return isWorkspaceAnon ? pruneWorkspaceUnresolvedFailures(out, nowMs, prev.at || null) : out;
 }
 
 function mergeCheckpointFailures(newItems = [], existingItems = []) {
@@ -1107,7 +1298,8 @@ export class CheckpointMethods {
         : parsedExitCode === 0;
     const effectiveOutcome = isTimeout ? "timeout" : ok ? "pass" : "fail";
     const normalizedExcerpt = effectiveOutcome === "fail" ? normalizeFailureExcerpt(failureExcerpt) : "";
-    const cleanCommand = String(command || "").trim().slice(0, 140);
+    const fullCommand = String(command || "").trim();
+    const cleanCommand = fullCommand.slice(0, 140);
     const cleanSummary = String(summary || "").trim().slice(0, 220);
     const isRunChecks = String(ruleId || "") === "run_checks";
     const batchMeta = isRunChecks
@@ -1120,7 +1312,7 @@ export class CheckpointMethods {
       0,
       Number(batchTotalCount || 0) || (isRunChecks ? batchMeta.identities.length : 0)
     );
-    const incomingIdentity = extractCheckIdentity(slotKind, "", cleanCommand, {
+    const incomingIdentity = extractCheckIdentity(slotKind, "", fullCommand || cleanCommand, {
       missingDetails: effectiveOutcome === "fail" && Boolean(missingDetails),
       batchKeys: batchMeta.batchKeys
     });
@@ -1134,7 +1326,7 @@ export class CheckpointMethods {
                   ? batchCommands
                   : []
               )
-                .map((c) => String(c?.name || c?.command || "").replace(/\s+/g, " ").trim())
+                .map((c) => stripCheckDurationSuffix(c?.name || "") || String(c?.command || "").replace(/\s+/g, " ").trim())
                 .filter(Boolean)
             )
           ).slice(0, 4)
@@ -1193,7 +1385,10 @@ export class CheckpointMethods {
           const rawPrev = isBuild ? existingRow?.last_build_json : existingRow?.last_test_json;
           if (rawPrev) {
             const prev = JSON.parse(rawPrev);
-            priorUnresolved = extractPriorUnresolvedFailures(prev, slotKind);
+            priorUnresolved = extractPriorUnresolvedFailures(prev, slotKind, {
+              isWorkspaceAnon: /^workspace:/i.test(sid),
+              nowMs: now
+            });
           }
         } catch {}
 
@@ -1205,7 +1400,10 @@ export class CheckpointMethods {
         } else if (effectiveOutcome === "fail") {
           let remainingPrior = priorUnresolved;
           if (isRunChecks && Array.isArray(passedCommands) && passedCommands.length > 0) {
-            const passOnlyIds = extractBatchCheckIdentities([], passedCommands).identities;
+            const passOnlyIds = expandPassIdentitiesFromList(
+              passedCommands,
+              extractBatchCheckIdentities([], passedCommands).identities
+            );
             if (passOnlyIds.length > 0) {
               remainingPrior = remainingPrior.filter((f) => {
                 if (!f || f.missingDetails) return true;
@@ -1239,7 +1437,7 @@ export class CheckpointMethods {
             if (missItem) newFailures.push(missItem);
           } else if (isRunChecks && Array.isArray(failedCommands) && failedCommands.length > 0) {
             for (const fc of failedCommands.slice(0, MAX_CHECKPOINT_UNRESOLVED)) {
-              const fcName = String(fc?.name || "").trim();
+              const fcName = stripCheckDurationSuffix(fc?.name || "");
               const fcCmd = String(fc?.command || "").trim();
               const fcKind = classifyCheckKind(fcName, fcCmd);
               const fcId = extractCheckIdentity(fcKind, fcName, fcCmd);
@@ -1262,7 +1460,7 @@ export class CheckpointMethods {
           } else {
             const item = toCompactCheckpointFailure(
               {
-                command: cleanCommand,
+                command: fullCommand || cleanCommand,
                 name: cleanCommand || slotKind,
                 kind: slotKind,
                 checkKey: incomingIdentity.checkKey,
@@ -1282,8 +1480,21 @@ export class CheckpointMethods {
           }
         } else {
           // effectiveOutcome === "pass"
-          const passIds =
-            isRunChecks && batchMeta.identities.length > 0 ? batchMeta.identities : [incomingIdentity];
+          const hasExplicitPassed = Array.isArray(passedCommands) && passedCommands.length > 0;
+          const passIds = isRunChecks
+            ? expandPassIdentitiesFromList(
+                hasExplicitPassed
+                  ? passedCommands
+                  : Array.isArray(batchCommands)
+                    ? batchCommands
+                    : [],
+                hasExplicitPassed
+                  ? []
+                  : batchMeta.identities.length > 0
+                    ? batchMeta.identities
+                    : extractCompoundPassIdentities(slotKind, "", fullCommand || cleanCommand)
+              )
+            : extractCompoundPassIdentities(slotKind, "", fullCommand || cleanCommand);
           const remaining = resolvePriorFailuresWithPassIds(priorUnresolved, passIds, effectiveBatchTotal);
           if (remaining.length > 0) {
             payloadObj.unresolvedFailures = remaining.slice(0, MAX_CHECKPOINT_UNRESOLVED);
@@ -1364,13 +1575,42 @@ export class CheckpointMethods {
       .reverse()
       .slice(0, 20);
 
+    const isWorkspaceAnon = /^workspace:/i.test(String(row.session_id || sid || ""));
+    const pruneSlot = (slot) => {
+      if (!slot || typeof slot !== "object") return slot;
+      if (!isWorkspaceAnon) return slot;
+      const nowMs = Date.now();
+      const copy = { ...slot };
+      const hadUnresolved = Array.isArray(copy.unresolvedFailures) && copy.unresolvedFailures.length > 0;
+      if (hadUnresolved) {
+        const fresh = pruneWorkspaceUnresolvedFailures(copy.unresolvedFailures, nowMs, copy.at || null);
+        if (fresh.length > 0) copy.unresolvedFailures = fresh;
+        else delete copy.unresolvedFailures;
+      }
+      if (copy.previousFailure && typeof copy.previousFailure === "object") {
+        if (isWorkspaceTimestampExpired(copy.previousFailure.at, nowMs, copy.at || null)) {
+          delete copy.previousFailure;
+        }
+      }
+      const isTimeout = copy.outcome === "timeout" || copy.timedOut === true;
+      if (!copy.ok && !isTimeout) {
+        if (hadUnresolved && !copy.unresolvedFailures) {
+          return null;
+        }
+        if (isWorkspaceTimestampExpired(copy.at, nowMs, null) && !copy.unresolvedFailures) {
+          return null;
+        }
+      }
+      return copy;
+    };
+
     let lastTest = null;
     if (row.last_test_json) {
-      try { lastTest = JSON.parse(row.last_test_json); } catch {}
+      try { lastTest = pruneSlot(JSON.parse(row.last_test_json)); } catch {}
     }
     let lastBuild = null;
     if (row.last_build_json) {
-      try { lastBuild = JSON.parse(row.last_build_json); } catch {}
+      try { lastBuild = pruneSlot(JSON.parse(row.last_build_json)); } catch {}
     }
 
     return {

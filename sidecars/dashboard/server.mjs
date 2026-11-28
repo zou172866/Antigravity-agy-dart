@@ -686,19 +686,27 @@ function syncConversationFamilyTranscripts(store, convId) {
 function getStatsPayload(data, defaultConvId = "default") {
   const store = getRuntimeStore();
   const appStartTime = getAppStartTime();
-  const { scope, convId, targetSid } = resolveTargetSession(data, defaultConvId);
+  const unboundHostTab = isUnboundSidecarHostRequest(data);
+  const { scope, convId, targetSid } = resolveTargetSession(
+    data,
+    unboundHostTab ? "__unbound__" : defaultConvId
+  );
   const isLifetimeScope = scope === "lifetime" || scope === "all";
   const isAppScope = scope === "app" || scope === "session";
   const effectiveConvId =
-    !isLifetimeScope && !isAppScope && typeof store.resolveRootSessionId === "function"
+    !isLifetimeScope && !isAppScope && !unboundHostTab && typeof store.resolveRootSessionId === "function"
       ? store.resolveRootSessionId(convId)
-      : convId;
+      : unboundHostTab && !isLifetimeScope && !isAppScope
+        ? "__unbound__"
+        : convId;
   const statsTargetSid = isLifetimeScope ? "all" : isAppScope ? "app" : effectiveConvId;
   let stats;
   if (isLifetimeScope) {
     stats = store.getStats("all");
   } else if (isAppScope) {
     stats = store.getStats("app", { sinceTs: appStartTime });
+  } else if (effectiveConvId === "__unbound__") {
+    stats = store.getStats("__unbound__");
   } else {
     syncConversationFamilyTranscripts(store, effectiveConvId);
     stats = store.getStats(effectiveConvId);
@@ -3584,6 +3592,10 @@ export function registerSidecarRoutes(
     if (!data) return makeBadRequest("Request body must be a JSON object");
     const check = validateStringFields(data, ["scope", "conversationId", "sessionId"]);
     if (!check.ok) return makeBadRequest(check.error);
+    for (const bf of ["fromSidecarHost", "conversationConfirmed"]) {
+      const bCheck = validateOptionalBooleanField(data, bf);
+      if (!bCheck.ok) return makeBadRequest(bCheck.error);
+    }
     return getStatsPayload(data, app.config?.conversationId);
   }, "POST");
   app.api("/api/doctor", (rawData) => {

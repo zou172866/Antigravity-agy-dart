@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.4/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.3/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.4/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.1
 Send this to Antigravity:
 
 ```text
-Clone tag v1.10.3 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.10.4 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.10.3 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,11 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.10.4
+- **Sticky check-guidance banner & duration-suffix normalization**: Uniformly strips trailing `outputMode: "full"` duration suffixes (`(136ms)` / `(1.2s)`) across `cache-analyzer.js`, `hooks/post-tool-use.mjs`, `checkpoints.js`, and the Sidecar UI without stripping non-duration labels (e.g. `(v2)`), preventing re-runs with different durations from stranding unresolved failures.
+- **Ad-hoc read-only `run_checks` probe filtering & compound / PowerShell 5.1 fail-fast resolution**: Prevents pure read-only/ad-hoc inspection probes (`git status/show/log/remote -v/tag -l` and inspection-chained inline probes) from permanently sticking red while preserving real verification gates (`agy plugin validate`, `node --check`, `npm run doctor`, `git diff --exit-code/--check`, mutating `git tag`/`branch`, downstream pipe/`xargs` verifiers, and filter regex errors). Anchors compound `&&` and Windows PowerShell 5.1 fail-fast chains (`if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` / `if ($LASTEXITCODE -eq 0) { ... }`) on matching verification clauses while rejecting `exit 0`, bare `exit`, `||`, unguarded `;`, and filter-pipe bypasses, and avoids 140-char checkpoint `checkKey` truncation.
+- **Cross-workspace Sidecar binding & workspace checkpoint hygiene**: Prefers live URL `conversationId` over frozen `preload.js` state, detects workspace mismatches on `onWorkspaceChange` / cold start / Watchdog updates to unbind or follow the new workspace cleanly (with `/api/stats` unbound isolation, queued state-switch refreshes, and standalone auto-follow), enables safe parent-workspace fallback in `resolveUniqueActivePrimarySessionForWorkspace` (blocking competing subagents and shallow home/tmp ancestors), and adds a 6-hour TTL for stale failures on anonymous `workspace:*` checkpoints.
 
 ### v1.10.3
 - **Quota attribution & `#1890` 4× sentinel CLI (`node bin/agy-dart.mjs audit quota` / `npm run quota:audit`, devtools-only, 0 Turn-0 overhead)**: Unifies three attribution layers offline—(1) `#1890` custom-agent 4× invocation & transitive descendant lineage audit against the official 1× built-in allowlist (including `/boost` workers) + on-disk `agents/*.md` scan; (2) `#1886` background safety-monitor attribution; (3) multi-session 1× equivalent USD billing split by Antigravity weekly quota pool (`gemini` vs `claude-gpt`, with `CHECKPOINT` model inheritance), dual-pool checkpoints (`--mark-gemini` / `--mark-claude-gpt`), and persistent per-pool personal 1× baselines (`--calibrate-baseline` / `--set-baseline-gemini` / `--set-baseline-claude-gpt`) so different tiers and pools neither false-alarm nor miss real 4× jumps.

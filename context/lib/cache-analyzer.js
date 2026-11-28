@@ -587,7 +587,39 @@ const PURE_SETUP_CLAUSE_RE =
   /^(?:(?:cd|chdir|pushd|set-location|push-location|sl)(?:\s|$)|export\s+[a-z_][a-z0-9_]*=|set\s+(?:"[a-z_][a-z0-9_]*=|[a-z_][a-z0-9_]*=)|\$env:[a-z0-9_]+\s*=|[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+))*$)/i;
 
 const READ_ONLY_STAGE_HEAD_RE =
-  /^(?:git(?:\.exe)?\s+(?:(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|--no-pager|-c\s+(?:"[^"]*"|'[^']*'|\S+))\s+)*(?:diff|status|log|show|branch|rev-parse|ls-files|grep|blame|shortlog|describe|tag|reflog|ls-tree|cat-file|check-ignore|for-each-ref)|(?:cat|head|tail|less|more|ls|dir|echo|printf|pwd|which|where|type|rg|ripgrep|grep|egrep|fgrep|select-string|sls|findstr|get-content|get-childitem|get-location|get-item|gc|gci|gl|stat|wc|file|tree|find|write-output|write-host|format-table|select-object|measure-object|sort-object|test-path|resolve-path|true)(?:\.exe)?)(?:\s|$)/i;
+  /^(?:git(?:\.exe)?\s+(?:(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|--no-pager|-c\s+(?:"[^"]*"|'[^']*'|\S+))\s+)*(?:diff|status|log|show|branch|rev-parse|ls-files|grep|blame|shortlog|describe|tag|reflog|ls-tree|cat-file|check-ignore|for-each-ref|remote(?!\s+(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b))|(?:cat|head|tail|less|more|ls|dir|echo|printf|pwd|which|where|type|rg|ripgrep|grep|egrep|fgrep|select-string|sls|findstr|get-content|get-childitem|get-location|get-item|gc|gci|gl|stat|wc|file|tree|find|write-output|write-host|format-table|select-object|measure-object|sort-object|test-path|resolve-path|true)(?:\.exe)?)(?:\s|$)/i;
+
+const PURE_INSPECTION_STAGE_HEAD_RE =
+  /^(?:git(?:\.exe)?\s+(?:(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|--no-pager|-c\s+(?:"[^"]*"|'[^']*'|\S+))\s+)*(?:diff(?!(?:.*\s)?(?:--exit-code|--check)(?:\s|$))|status|log|show|branch(?=\s+(?:-a|--all|-r|--remotes|-l|--list|-v|-vv|--verbose|--show-current|--contains(?:=|\s)|--merged(?:\s|$)|--no-merged(?:\s|$))|$)|rev-parse|ls-files|blame|shortlog|describe|tag(?=\s+(?:-l|--list|--sort(?:=|\s)|--contains(?:=|\s)|--points-at(?:=|\s)|--merged(?:\s|$)|--no-merged(?:\s|$))|$)|reflog|ls-tree|cat-file|check-ignore|for-each-ref|remote(?!\s+(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b))|(?:cat|head|tail|less|more|ls|dir|echo|printf|pwd|which|where|type|get-content|get-childitem|get-location|get-item|gc|gci|gl|stat|wc|file|tree|write-output|write-host|format-table|select-object|measure-object|sort-object|test-path|resolve-path|true)(?:\.exe)?)(?:\s|$)/i;
+
+const SAFE_INSPECTION_PIPE_STAGE_RE =
+  /^(?:cat|head|tail|less|more|wc|sort|uniq|tr|cut|tee|select-object|measure-object|sort-object|format-table|format-list|out-string|write-output|write-host)(?:\.exe)?(?:\s|$)/i;
+
+const XARGS_PREFIX_RE =
+  /^xargs(?:\.exe)?(?:\s+(?:-(?:[0-9a-zA-Z]+)(?:\s+(?:"[^"]*"|'[^']*'|\S+))?|--[a-z0-9-]+(?:=(?:"[^"]*"|'[^']*'|\S+))?))*\s+/i;
+
+const PS_FAILFAST_ABORT_RE =
+  /^if\s*\(\s*(?:\$lastexitcode\s+-ne\s+0|-not\s+\$\?)\s*\)\s*\{\s*(?:exit\s+(?:\$lastexitcode|[1-9]\d*)|throw\b[^}]*)\s*;?\s*\}$/i;
+
+const PS_IF_PREV_OK_BLOCK_RE =
+  /^if\s*\(\s*(?:\$lastexitcode\s+-eq\s+0|\$\?)\s*\)\s*\{([\s\S]+)\}$/i;
+
+const ADHOC_INLINE_PROBE_STAGE_RE =
+  /^(?:(?:node|bun|deno)(?:\.exe)?\s+(?:--[a-z0-9-]+(?:=\S+)?\s+)*(?:-e|--eval|-p|--print)(?:\s|$)|(?:python3?|py)(?:\.exe)?\s+(?:-[a-zA-Z0-9]+\s+)*-c(?:\s|$))/i;
+
+const ADHOC_INSPECTION_NAME_RE =
+  /^(?:inspect|probe|show|list|dump|read|debug|git|status|log|diff|version|versions|commits?|tags?|branches?|files?|env)(?:[-_:\s]|$)/i;
+
+const REAL_VERIFY_NAME_RE =
+  /(?:^|[-_:\s/])(?:test|tests|spec|e2e|smoke|unit|integration|build|bundle|compile|tsc|typecheck|lint|eslint|biome|verify|validate|audit|doctor|health|budget|check)(?:$|[-_:\s/])/i;
+
+const CHECK_DURATION_SUFFIX_RE = /\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\)$/i;
+
+export function stripCheckDurationSuffix(name = "") {
+  const collapsed = String(name || "").replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  return collapsed.replace(CHECK_DURATION_SUFFIX_RE, "").trim();
+}
 
 const RUNNER_PREFIX_RE =
   /^(?:(?:npx(?:\.cmd)?(?:\s+(?:-y|--yes|--no-install|-p\s+\S+))*|npm(?:\.cmd)?\s+exec(?:\s+--)?|(?:pnpm|yarn|bun)(?:\.cmd)?\s+(?:exec|dlx)(?:\s+--)?|bunx(?:\.cmd)?|(?:uv|poetry|pipenv|pdm|hatch)(?:\.exe)?\s+run|(?:python3?|py)(?:\.exe)?(?:\s+-[a-zA-Z0-9]+)*\s+-m|dotnet(?:\.exe)?\s+tool\s+run)\s+)+/i;
@@ -961,6 +993,62 @@ function getTrailingSemicolonSegment(commandText) {
   };
 }
 
+function unwrapPsPrevOkClause(clause) {
+  const m = String(clause || "").trim().match(PS_IF_PREV_OK_BLOCK_RE);
+  return m ? m[1].trim() : "";
+}
+
+function getFailFastTrailingClauses(commandText) {
+  const { clauses, operators } = splitShellClauses(commandText);
+  if (clauses.length === 0) return { clauses: [], operators: [] };
+  const segments = [];
+  let curClauses = [clauses[0]];
+  let curOps = [];
+  for (let i = 0; i < operators.length; i++) {
+    if (operators[i] === ";") {
+      segments.push({ clauses: curClauses, operators: curOps });
+      curClauses = [clauses[i + 1]];
+      curOps = [];
+    } else {
+      curOps.push(operators[i]);
+      curClauses.push(clauses[i + 1]);
+    }
+  }
+  segments.push({ clauses: curClauses, operators: curOps });
+
+  const collected = [];
+  const collectedOps = [];
+  let idx = segments.length - 1;
+  while (idx >= 0) {
+    const seg = segments[idx];
+    const singleRaw = seg.clauses.length === 1 ? seg.clauses[0].trim() : "";
+    if (singleRaw && PS_FAILFAST_ABORT_RE.test(singleRaw)) {
+      idx -= 1;
+      continue;
+    }
+    const unwrappedOk = singleRaw ? unwrapPsPrevOkClause(singleRaw) : "";
+    if (unwrappedOk) {
+      const inner = getFailFastTrailingClauses(unwrappedOk);
+      collected.unshift(...inner.clauses);
+      collectedOps.unshift(...inner.operators);
+      idx -= 1;
+      continue;
+    }
+    collected.unshift(...seg.clauses);
+    collectedOps.unshift(...seg.operators);
+    if (idx > 0) {
+      const prevSeg = segments[idx - 1];
+      const prevSingle = prevSeg.clauses.length === 1 ? prevSeg.clauses[0].trim() : "";
+      if (prevSingle && PS_FAILFAST_ABORT_RE.test(prevSingle)) {
+        idx -= 1;
+        continue;
+      }
+    }
+    break;
+  }
+  return { clauses: collected, operators: collectedOps };
+}
+
 function isPureSetupClause(clause) {
   const trimmed = String(clause || "").trim();
   if (!trimmed) return false;
@@ -1041,9 +1129,71 @@ function clauseHasFilterStage(clause) {
   return false;
 }
 
+function cleanPipeStageHead(stage) {
+  return normalizeStageCommandHead(
+    String(stage || "")
+      .replace(/\b2>&1\b/g, "")
+      .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
+      .trim()
+  );
+}
+
+function isSafeDownstreamInspectionStage(stage) {
+  const head = cleanPipeStageHead(stage);
+  if (!head) return false;
+  if (FILTER_STAGE_CMD_RE.test(head)) return false;
+  const unwrapped = stripRunnerPrefix(head.replace(XARGS_PREFIX_RE, "").trim());
+  if (REAL_VERIFY_STAGE_RE.test(unwrapped)) return false;
+  return SAFE_INSPECTION_PIPE_STAGE_RE.test(head);
+}
+
+function isPureInspectionClause(clause) {
+  const trimmed = String(clause || "").trim();
+  if (!trimmed || clauseHasFilterStage(trimmed)) return false;
+  const stages = splitOutsideQuotes(trimmed, (s, i) => (s[i] === "|" ? 1 : 0));
+  if (stages.length === 0) return false;
+  const head = cleanPipeStageHead(stages[0]);
+  if (!PURE_INSPECTION_STAGE_HEAD_RE.test(head)) return false;
+  for (let i = 1; i < stages.length; i++) {
+    if (!isSafeDownstreamInspectionStage(stages[i])) return false;
+  }
+  return true;
+}
+
+function isInlineProbeClause(clause) {
+  const trimmed = String(clause || "").trim();
+  if (!trimmed || clauseHasFilterStage(trimmed)) return false;
+  const stages = splitOutsideQuotes(trimmed, (s, i) => (s[i] === "|" ? 1 : 0));
+  if (stages.length === 0) return false;
+  const head = cleanPipeStageHead(stages[0]);
+  if (!ADHOC_INLINE_PROBE_STAGE_RE.test(head)) return false;
+  for (let i = 1; i < stages.length; i++) {
+    if (!isSafeDownstreamInspectionStage(stages[i])) return false;
+  }
+  return true;
+}
+
+export function isAdhocInspectionRunCheckBlock(name = "", commandText = "") {
+  const cleanCmd = unwrapQuotedWrapperArg(String(commandText || "")).trim();
+  if (!cleanCmd) return false;
+  const cleanName = stripCheckDurationSuffix(name);
+  if (cleanName && REAL_VERIFY_NAME_RE.test(cleanName)) return false;
+  if (classifyCheckKind(cleanName, cleanCmd) !== "check") return false;
+  if (isRealVerifyCommand(cleanCmd)) return false;
+  const { clauses } = splitShellClauses(cleanCmd);
+  const nonSetup = clauses.filter((c) => !isPureSetupClause(c));
+  if (nonSetup.length === 0) return false;
+  if (nonSetup.every((c) => isPureInspectionClause(c))) return true;
+  const allInspectionOrProbe = nonSetup.every((c) => isPureInspectionClause(c) || isInlineProbeClause(c));
+  if (!allInspectionOrProbe) return false;
+  const hasPureInspectionClause = nonSetup.some((c) => isPureInspectionClause(c));
+  const hasInspectionName = Boolean(cleanName && ADHOC_INSPECTION_NAME_RE.test(cleanName));
+  return hasPureInspectionClause || hasInspectionName;
+}
+
 function isNonConvergingPassCommand(commandText) {
   if (!commandText || typeof commandText !== "string" || !commandText.trim()) return false;
-  const { clauses, operators } = getTrailingSemicolonSegment(commandText);
+  const { clauses, operators } = getFailFastTrailingClauses(commandText);
   if (clauses.length === 0) return false;
   if (operators.includes("||")) return true;
   const nonSetup = clauses.filter((c) => !isPureSetupClause(c));
@@ -1251,7 +1401,7 @@ function isStrongVerifyPassBlock(block) {
   const cmd = unwrapQuotedWrapperArg(String(block.cmd || "")).trim();
   if (cmd) {
     if (isNonConvergingPassCommand(cmd)) return false;
-    const { clauses } = getTrailingSemicolonSegment(cmd);
+    const { clauses } = getFailFastTrailingClauses(cmd);
     for (const clause of clauses) {
       if (isPureSetupClause(clause) || isReadOnlyClause(clause) || clauseHasFilterStage(clause)) continue;
       const stages = splitOutsideQuotes(clause, (s, i) => (s[i] === "|" ? 1 : 0));
@@ -1306,7 +1456,7 @@ function evaluateRunChecksResult(text, activeCandidateFiles = null) {
       flush();
       blocks.push({
         kind: "pass",
-        name: compactPass[1].trim(),
+        name: stripCheckDurationSuffix(compactPass[1] || ""),
         cmd: (compactPass[2] || "").trim(),
         body: (compactPass[3] || "").trim(),
         exitCode: 0,
@@ -1319,7 +1469,7 @@ function evaluateRunChecksResult(text, activeCandidateFiles = null) {
       flush();
       const tag = heading[1].toUpperCase();
       const meta = heading[2] || "";
-      const name = (heading[3] || "").trim();
+      const name = stripCheckDurationSuffix(heading[3] || "");
       const exitMatch = meta.match(/exit\s+(\d+)/i);
       const exitCode = exitMatch ? Number(exitMatch[1]) : tag === "PASS" ? 0 : null;
       current = {
@@ -1375,6 +1525,10 @@ function evaluateRunChecksResult(text, activeCandidateFiles = null) {
     if (b.kind !== "fail") continue;
     if (isZeroMatchFilterExit(b.cmd, b.body, b.exitCode)) {
       benignBlocks.push({ ...b, benignReason: "zero_match_filter" });
+      continue;
+    }
+    if (isAdhocInspectionRunCheckBlock(b.name, b.cmd)) {
+      benignBlocks.push({ ...b, benignReason: "adhoc_inspection" });
       continue;
     }
     if (
@@ -1490,7 +1644,7 @@ export function classifyCheckKind(name = "", cmd = "") {
 }
 
 export function formatCheckDisplayName(name = "", cmd = "") {
-  const cleanName = String(name || "").replace(/\s+/g, " ").trim();
+  const cleanName = stripCheckDurationSuffix(name);
   if (cleanName) return cleanName.slice(0, 80);
   const cleanCmd = String(cmd || "").replace(/\s+/g, " ").trim();
   if (cleanCmd) return cleanCmd.slice(0, 80);
@@ -1684,7 +1838,8 @@ export function extractCheckIdentity(kind = "check", name = "", command = "", { 
   const cleanCmd = unwrapQuotedWrapperArg(String(command || "")).trim();
   let primaryStage = "";
   if (cleanCmd) {
-    const { clauses } = getTrailingSemicolonSegment(cleanCmd);
+    const { clauses } = getFailFastTrailingClauses(cleanCmd);
+    const candidateStages = [];
     for (let idx = clauses.length - 1; idx >= 0; idx--) {
       const clause = clauses[idx];
       if (isPureSetupClause(clause) || isReadOnlyClause(clause)) continue;
@@ -1694,8 +1849,16 @@ export function extractCheckIdentity(kind = "check", name = "", command = "", { 
           .replace(/\b2>&1\b/g, "")
           .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
           .trim();
-        primaryStage = stripRunnerPrefix(normalizeStageCommandHead(stage0));
-        break;
+        const normalizedStage = stripRunnerPrefix(normalizeStageCommandHead(stage0));
+        if (normalizedStage) candidateStages.push(normalizedStage);
+      }
+    }
+    if (candidateStages.length > 0) {
+      if (candidateStages.length > 1 && (safeKind === "test" || safeKind === "build")) {
+        const matchingKindStage = candidateStages.find((st) => classifyCheckKind("", st) === safeKind);
+        primaryStage = matchingKindStage || candidateStages[0];
+      } else {
+        primaryStage = candidateStages[0];
       }
     }
   }
@@ -1961,7 +2124,7 @@ export function extractCheckIdentity(kind = "check", name = "", command = "", { 
     }
   }
 
-  const cleanName = String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const cleanName = stripCheckDurationSuffix(name).toLowerCase();
   if (!tool) {
     if (cleanName && !GENERIC_CHECK_NAMES.has(cleanName)) {
       tool = "named";
@@ -2092,12 +2255,60 @@ export function doesPassResolveFailure(passId, failId) {
   return true;
 }
 
+export function extractCompoundPassIdentities(kind = "check", name = "", command = "") {
+  const cleanCmd = unwrapQuotedWrapperArg(String(command || "")).trim();
+  if (cleanCmd) {
+    const { clauses, operators } = getFailFastTrailingClauses(cleanCmd);
+    if (operators.includes("||")) return [];
+    const nonSetup = clauses.filter((c) => !isPureSetupClause(c));
+    if (nonSetup.length > 0 && nonSetup.every((c) => isReadOnlyClause(c) || clauseHasFilterStage(c))) {
+      return [];
+    }
+    const validClauses = nonSetup.filter((c) => !isReadOnlyClause(c) && !clauseHasFilterStage(c));
+    const byKey = new Map();
+    if (validClauses.length === 1) {
+      const onlyStage = splitOutsideQuotes(validClauses[0], (s, i) => (s[i] === "|" ? 1 : 0))[0] || "";
+      const stageClean = onlyStage
+        .replace(/\b2>&1\b/g, "")
+        .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
+        .trim();
+      const singleId = extractCheckIdentity(kind, name, stageClean || cleanCmd);
+      if (singleId && !singleId.isMissingSummary) byKey.set(singleId.checkKey, singleId);
+      return Array.from(byKey.values());
+    }
+    const hasFilteredClause = nonSetup.some((c) => clauseHasFilterStage(c));
+    if (!hasFilteredClause) {
+      const primary = extractCheckIdentity(kind, name, cleanCmd);
+      if (primary && !primary.isMissingSummary) {
+        byKey.set(primary.checkKey, primary);
+      }
+    }
+    for (const clause of validClauses) {
+      const stages = splitOutsideQuotes(clause, (s, i) => (s[i] === "|" ? 1 : 0));
+      if (stages.length === 0) continue;
+      const stage0 = stages[0]
+        .replace(/\b2>&1\b/g, "")
+        .replace(/\b[12]>(?:\/dev\/null|\$null|nul|\S+)\b/gi, "")
+        .trim();
+      if (!stage0) continue;
+      const clauseKind = classifyCheckKind("", stage0);
+      const clauseId = extractCheckIdentity(clauseKind, "", stage0);
+      if (clauseId && !clauseId.isMissingSummary && !byKey.has(clauseId.checkKey)) {
+        byKey.set(clauseId.checkKey, clauseId);
+      }
+    }
+    return Array.from(byKey.values());
+  }
+  const primary = extractCheckIdentity(kind, name, command);
+  return primary && !primary.isMissingSummary ? [primary] : [];
+}
+
 export function extractBatchCheckIdentities(commands = [], blockResults = []) {
   const byKey = new Map();
   const batchCommands = [];
   const seenCmdKey = new Set();
   const addEntry = (rawName, rawCmd) => {
-    const name = String(rawName || "").replace(/\s+/g, " ").trim();
+    const name = stripCheckDurationSuffix(rawName);
     const command = String(rawCmd || "").replace(/\s+/g, " ").trim();
     if (!name && !command) return;
     const kind = classifyCheckKind(name, command);
@@ -2562,30 +2773,42 @@ function extractCallEditPaths(call, options = {}) {
 }
 
 const REAL_VERIFY_STAGE_RE =
-  /^(?:(?:vitest|jest|pytest|mocha|ava|playwright|cypress|unittest|rspec|phpunit|ctest|tsc|vue-tsc|svelte-check|typecheck|type-check|eslint|oxlint|biome|ruff|flake8|mypy|pyright|basedpyright|pylint|stylelint|shellcheck|webpack|rollup|tsup|esbuild|swc|gradle|gradlew|mvn|mvnw|make|cmake|doc-health-check|health-check|healthcheck)(?:\.(?:exe|cmd|bat|ps1|sh))?(?:\s|$)|prettier(?:\.(?:exe|cmd))?\s+(?:.*\s)?--check(?:\s|$)|node(?:\.exe)?\s+(?:--[a-z0-9-]+(?:=\S+)?\s+)*--test(?:\s|$)|deno(?:\.exe)?\s+(?:test|check|lint)(?:\s|$)|cargo(?:\.exe)?\s+(?:test|check|build|clippy)(?:\s|$)|go(?:\.exe)?\s+(?:test|build|vet)(?:\s|$)|dotnet(?:\.exe)?\s+(?:test|build)(?:\s|$)|(?:electron-)?vite(?:\.(?:exe|cmd))?\s+build(?:\s|$)|(?:next|nuxt|astro|svelte-kit|remix|rsbuild|parcel|turbo|nx)(?:\.(?:exe|cmd))?\s+(?:build|typecheck|lint|check|test)(?:\s|$)|npm(?:\.cmd)?\s+(?:(?:--(?:prefix|cwd|dir|filter|workspace)(?:=|\s+)\S+|-(?:w|C)\s+\S+)\s+)*(?:t|test|run(?:-script)?\s+[a-z0-9_.:/-]*(?:build|check|verify|lint|test|typecheck|type-check|validate|audit|smoke|e2e|health|prefix:budget)[a-z0-9_.:/-]*)(?:\s|$)|(?:pnpm|yarn|bun)(?:\.cmd)?\s+(?:(?:--(?:prefix|cwd|dir|filter|workspace)(?:=|\s+)\S+|-w|-(?:C|F)\s+\S+)\s+)*(?:t|test|(?:run\s+)?[a-z0-9_.:/-]*(?:build|check|verify|lint|test|typecheck|type-check|validate|audit|smoke|e2e|health|prefix:budget)[a-z0-9_.:/-]*)(?:\s|$)|(?:(?:node|tsx|ts-node|bun|deno|python3?|py|bash|sh|zsh|pwsh|powershell|ruby|perl)(?:\.exe)?(?:\s+(?:-ExecutionPolicy\s+\S+|-[a-zA-Z0-9-]+))*\s+)?(?:"[^"]*[\\/]scripts[\\/]|'[^']*[\\/]scripts[\\/]|["']?(?:(?:[a-z]:[\\/][^"'\s]*[\\/]|[\\/][^"'\s]*[\\/]|\.\.?[\\/])?)scripts[\\/])[a-z0-9_.-]*(?:check|verify|lint|test|validate|build|audit)[a-z0-9_.-]*)/i;
+  /^(?:(?:vitest|jest|pytest|mocha|ava|playwright|cypress|unittest|rspec|phpunit|ctest|tsc|vue-tsc|svelte-check|typecheck|type-check|eslint|oxlint|biome|ruff|flake8|mypy|pyright|basedpyright|pylint|stylelint|shellcheck|webpack|rollup|tsup|esbuild|swc|gradle|gradlew|mvn|mvnw|make|cmake|doc-health-check|health-check|healthcheck)(?:\.(?:exe|cmd|bat|ps1|sh))?(?:\s|$)|prettier(?:\.(?:exe|cmd))?\s+(?:.*\s)?--check(?:\s|$)|agy(?:\.(?:exe|cmd|bat))?\s+plugin\s+(?:validate|check|verify|test)(?:\s|$)|node(?:\.exe)?\s+(?:--[a-z0-9-]+(?:=\S+)?\s+)*(?:--test|--check|-c)(?:\s|$)|deno(?:\.exe)?\s+(?:test|check|lint)(?:\s|$)|cargo(?:\.exe)?\s+(?:test|check|build|clippy)(?:\s|$)|go(?:\.exe)?\s+(?:test|build|vet)(?:\s|$)|dotnet(?:\.exe)?\s+(?:test|build)(?:\s|$)|(?:electron-)?vite(?:\.(?:exe|cmd))?\s+build(?:\s|$)|(?:next|nuxt|astro|svelte-kit|remix|rsbuild|parcel|turbo|nx)(?:\.(?:exe|cmd))?\s+(?:build|typecheck|lint|check|test)(?:\s|$)|npm(?:\.cmd)?\s+(?:(?:--(?:prefix|cwd|dir|filter|workspace)(?:=|\s+)\S+|-(?:w|C)\s+\S+)\s+)*(?:t|test|run(?:-script)?\s+[a-z0-9_.:/-]*(?:build|check|verify|lint|test|typecheck|type-check|validate|audit|smoke|e2e|health|doctor|prefix:budget)[a-z0-9_.:/-]*)(?:\s|$)|(?:pnpm|yarn|bun)(?:\.cmd)?\s+(?:(?:--(?:prefix|cwd|dir|filter|workspace)(?:=|\s+)\S+|-w|-(?:C|F)\s+\S+)\s+)*(?:t|test|(?:run\s+)?[a-z0-9_.:/-]*(?:build|check|verify|lint|test|typecheck|type-check|validate|audit|smoke|e2e|health|doctor|prefix:budget)[a-z0-9_.:/-]*)(?:\s|$)|(?:(?:node|tsx|ts-node|bun|deno|python3?|py|bash|sh|zsh|pwsh|powershell|ruby|perl)(?:\.exe)?(?:\s+(?:-ExecutionPolicy\s+\S+|-[a-zA-Z0-9-]+))*\s+)?(?:"[^"]*[\\/]scripts[\\/]|'[^']*[\\/]scripts[\\/]|["']?(?:(?:[a-z]:[\\/][^"'\s]*[\\/]|[\\/][^"'\s]*[\\/]|\.\.?[\\/])?)scripts[\\/])[a-z0-9_.-]*(?:check|verify|lint|test|validate|build|audit|doctor)[a-z0-9_.-]*)/i;
 
 function isRealVerifyCommand(cmdStr) {
   const { clauses } = splitShellClauses(cmdStr);
   if (clauses.length === 0) return false;
-  for (const clause of clauses) {
-    if (isPureSetupClause(clause) || isReadOnlyClause(clause)) continue;
-    const stages = splitOutsideQuotes(clause, (s, i) => (s[i] === "|" ? 1 : 0));
-    if (stages.length === 0) continue;
-    const stripped = stripRunnerPrefix(normalizeStageCommandHead(stages[0]));
-    if (REAL_VERIFY_STAGE_RE.test(stripped)) return true;
+  for (const rawClause of clauses) {
+    const unwrapped = unwrapPsPrevOkClause(rawClause);
+    const subClauses = unwrapped ? splitShellClauses(unwrapped).clauses : [rawClause];
+    for (const clause of subClauses) {
+      if (isPureSetupClause(clause) || PS_FAILFAST_ABORT_RE.test(String(clause || "").trim())) {
+        continue;
+      }
+      const stages = splitOutsideQuotes(clause, (s, i) => (s[i] === "|" ? 1 : 0));
+      for (const rawStage of stages) {
+        const head = cleanPipeStageHead(rawStage);
+        if (!head) continue;
+        const stripped = stripRunnerPrefix(head.replace(XARGS_PREFIX_RE, "").trim());
+        if (REAL_VERIFY_STAGE_RE.test(stripped)) return true;
+      }
+    }
   }
   return false;
 }
 
 function isConvergingVerifyCommand(cmdStr) {
-  const { clauses, operators } = getTrailingSemicolonSegment(cmdStr);
+  const { clauses, operators } = getFailFastTrailingClauses(cmdStr);
   if (clauses.length === 0 || operators.includes("||")) return false;
   for (const clause of clauses) {
-    if (isPureSetupClause(clause) || isReadOnlyClause(clause) || clauseHasFilterStage(clause)) continue;
+    if (isPureSetupClause(clause) || clauseHasFilterStage(clause)) continue;
     const stages = splitOutsideQuotes(clause, (s, i) => (s[i] === "|" ? 1 : 0));
-    if (stages.length === 0) continue;
-    const stripped = stripRunnerPrefix(normalizeStageCommandHead(stages[0]));
-    if (REAL_VERIFY_STAGE_RE.test(stripped)) return true;
+    for (const rawStage of stages) {
+      const head = cleanPipeStageHead(rawStage);
+      if (!head) continue;
+      const stripped = stripRunnerPrefix(head.replace(XARGS_PREFIX_RE, "").trim());
+      if (REAL_VERIFY_STAGE_RE.test(stripped)) return true;
+    }
   }
   return false;
 }
@@ -3263,9 +3486,10 @@ export function analyzeTranscriptCache(steps, options = {}) {
       .map((f) => shortTargetLabel(f, 48))
       .slice(0, 3);
     const effectiveLaunchStep = launchStep >= 0 ? launchStep : stepIndex;
-    const identity = extractCheckIdentity(safeKind, name, cleanCmd, { missingDetails, batchKeys });
+    const fullCmdForId = String(command || "").trim() || cleanCmd;
+    const identity = extractCheckIdentity(safeKind, name, fullCmdForId, { missingDetails, batchKeys });
     const cleanBatchNames = Array.isArray(batchNames)
-      ? Array.from(new Set(batchNames.map((n) => String(n || "").replace(/\s+/g, " ").trim()).filter(Boolean))).slice(0, 4)
+      ? Array.from(new Set(batchNames.map((n) => stripCheckDurationSuffix(n)).filter(Boolean))).slice(0, 4)
       : [];
 
     if (outcome === "timeout") {
@@ -3338,6 +3562,9 @@ export function analyzeTranscriptCache(steps, options = {}) {
       return;
     }
     // outcome === "pass"
+    const passIdentities = extractCompoundPassIdentities(safeKind, name, command || cleanCmd);
+    if (passIdentities.length === 0) return;
+    const effectivePassIds = passIdentities;
     const prevSameSlot = checkSlots.get(identity.checkKey);
     if (prevSameSlot && prevSameSlot.outcome === "fail") {
       if ((prevSameSlot.editEpoch ?? 0) > recEpoch) return;
@@ -3348,7 +3575,7 @@ export function analyzeTranscriptCache(steps, options = {}) {
     for (const [slotKey, slot] of Array.from(checkSlots.entries())) {
       if (!slot || slot.outcome !== "fail") continue;
       const failId = slot._identity || extractCheckIdentity(slot.kind, slot.name, slot.command, { missingDetails: slot.missingDetails });
-      if (!doesPassResolveFailure(identity, failId)) continue;
+      if (!effectivePassIds.some((pid) => doesPassResolveFailure(pid, failId))) continue;
       if ((slot.editEpoch ?? 0) > recEpoch) continue;
       if (slot.editEpoch === recEpoch && (slot.stepIndex ?? -1) >= stepIndex && stepIndex >= 0) {
         continue;
