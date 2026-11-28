@@ -64,7 +64,7 @@ Antigravity can occasionally re-review long chats in the background and quietly 
 6. **Secret masking & sensitive-file protection**: Masks API keys and tokens in logs or web pages, blocks accidental reads of `.env` files when configured, and stops untrusted Git configs from running external commands.
 7. **Keep tool replies under 8.8 KB**: Antigravity spills tool replies above ~10 KB into a temp file that costs an extra read turn; the plugin stays inside 8.8 KB and shifts leftover space from short passing checks to real error stack traces.
 8. **Usage breakdown, inline diagnostic cards & one-click updates**: Inspect how much context goes to file reads, terminal output, or subagents, view 15-turn cache trends, see interactive inline cards when running `ctx_stats` / `ctx_doctor` (with one-click jump pills to open the side panel on Antigravity `v2.35.1+`), update right from the panel top bar, or replay past chats via CLI to estimate cache hits and warming cost.
-9. **Plays nicely with your Skills + Skills bloat check**: Your Skills handle workflows while `agy-dart` quietly guards file reads, trims logs, and watches cache underneath; run `node bin/agy-dart.mjs audit skills` to see how much startup context each installed Skill uses.
+9. **Plays nicely with your Skills + Skills & Quota Audits**: Your Skills handle workflows while `agy-dart` quietly guards file reads, trims logs, and watches cache underneath; run `node bin/agy-dart.mjs audit skills` to inspect Skill startup tax or `node bin/agy-dart.mjs audit quota` (with `--mark <pct>`) to separate 1× work, `#1890` 4× custom-agent calls, and `#1886` background reviews.
 
 > Antigravity updates frequently — click **Star** at the top right to follow compatibility updates.
 

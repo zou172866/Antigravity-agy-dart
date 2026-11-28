@@ -42,6 +42,9 @@ try {
       } else if(args[0]==="safety"){
         script="scripts/cache-audit.mjs";
         pass=["--safety-audit",...args.slice(1)];
+      } else if(args[0]==="quota"){
+        script="scripts/quota-audit.mjs";
+        pass=args.slice(1);
       } else {
         script=args[0]==="prefix"?"scripts/prefix-budget.mjs":"scripts/cache-audit.mjs";
         pass=["prefix","cache"].includes(args[0])?args.slice(1):args;

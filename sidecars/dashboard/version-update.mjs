@@ -38,6 +38,7 @@ const FALLBACK_DEVTOOLS_FILES = new Set([
   "fast/benchmark.mjs",
   "context/lib/cache-simulator.js",
   "scripts/cache-audit.mjs",
+  "scripts/quota-audit.mjs",
   "scripts/prefix-budget.mjs",
   "scripts/verify-package-graph.mjs",
   "scripts/gen-review-brief.mjs"

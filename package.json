@@ -24,6 +24,7 @@
     "cache:simulate": "node fast/benchmark.mjs cache simulate --local --recent 10",
     "cache:audit": "node scripts/cache-audit.mjs",
     "safety:audit": "node scripts/cache-audit.mjs --safety-audit",
+    "quota:audit": "node scripts/quota-audit.mjs",
     "prefix:budget": "node scripts/prefix-budget.mjs",
     "verify:pkg": "node scripts/verify-package-graph.mjs",
     "brief:sync": "node scripts/gen-review-brief.mjs --write",

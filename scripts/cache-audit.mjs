@@ -3887,6 +3887,25 @@ export function auditSafetyMonitorOnly(options = {}) {
 
 export { formatSafetyAuditMarkdown };
 
+export function auditCustomAgentsOnly(options = {}) {
+  const workspace = path.resolve(options.workspace || process.cwd());
+  const configDir = path.resolve(options.configDir || path.join(getHomeDir(), ".gemini", "config"));
+  const workspaceOnly = Boolean(options.workspaceOnly);
+  const findings = [];
+  const { activePlugins } = discoverPlugins(configDir, workspace, { workspaceOnly });
+  const customAgents = auditCustomAgents(configDir, workspace, activePlugins, findings, { workspaceOnly });
+  const sortedRaw = sortFindings(findings);
+  const { findings: sortedFindings, findingsByScope } = annotateFindingsScope(sortedRaw, workspace, { workspaceOnly });
+  return stableSortObject({
+    workspace,
+    configDir,
+    workspaceOnly,
+    customAgents,
+    findingsByScope,
+    findings: sortedFindings
+  });
+}
+
 export async function auditEnvironmentCache(options = {}) {
   const workspace = path.resolve(options.workspace || process.cwd());
   const configDir = path.resolve(options.configDir || path.join(getHomeDir(), ".gemini", "config"));
