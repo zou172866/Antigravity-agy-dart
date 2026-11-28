@@ -43,6 +43,7 @@ import {
 } from "../scripts/verify-package-graph.mjs";
 import { DatabaseSync } from "node:sqlite";
 import net from "node:net";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -192,7 +193,7 @@ process.stdout.write(String(isAllowedHostHeader("127.0.0.1:8765")) + ":" + resol
   }
 
   // Static audit: index.html escapes custom extensions and sends POST + CSRF token on ALL /api/* calls
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   assert.ok(htmlSrc.includes('meta[name="agy-dart-token"]'), "index.html must read CSRF meta token");
   assert.ok(htmlSrc.includes("X-Agy-Dart-Token"), "index.html must attach X-Agy-Dart-Token header");
   assert.equal(/apiFetch\([^)]*method:\s*['"]GET['"]/.test(htmlSrc), false, "index.html must use POST for all /api/* calls");
@@ -1671,6 +1672,9 @@ test("P1-Hardening 7: Token estimator empirical calibration + per-feature ROI te
       "context/lib/store/checkpoints.js",
       "context/lib/store/reads.js",
       "context/lib/store/settings-maintenance.js",
+      "context/lib/watchdog-lease-core.js",
+      "context/lib/watchdog-transcript.js",
+      "context/lib/watchdog-summaries.js",
       "context/lib/watchdog-lease.js",
       "context/lib/executor.js",
       "context/lib/tools.js",
@@ -2068,7 +2072,7 @@ test("Round-3 P1-3, P2-2 & P2-6: Sidecar UI_TOKEN fail-closed, conversationId tr
     // P2-6: os.homedir() & ancestors rejected as handoff roots; index.html avoids ?token= URL leak; handoff disables git fsmonitor/hooksPath
     assert.equal(resolveAllowedHandoffCwd(os.homedir(), [os.homedir()]), "");
     assert.equal(resolveAllowedHandoffCwd(path.dirname(os.homedir()), [path.dirname(os.homedir())]), "");
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     assert.equal(htmlSrc.includes("token=${encodeURIComponent"), false, "index.html must send X-Sidecar-Token header without leaking ?token= in URL");
     const handoffSrc = fs.readFileSync(path.join(ROOT, "context", "lib", "handoff.js"), "utf8");
     assert.ok(handoffSrc.includes("core.fsmonitor=false") && handoffSrc.includes("core.hooksPath="));

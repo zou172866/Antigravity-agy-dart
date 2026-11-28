@@ -1051,6 +1051,120 @@ export class SettingsMaintenanceMethods {
     throw new Error(`Invalid purge scope: '${String(scope)}'`);
   }
 
+  /** Inspect SQLite file size, WAL size, and reclaimable freelist fragmentation */
+  getStorageHealth() {
+    this.open();
+    const stat = fs.existsSync(this.dbPath) ? fs.statSync(this.dbPath) : null;
+    const walPath = `${this.dbPath}-wal`;
+    const walStat = fs.existsSync(walPath) ? fs.statSync(walPath) : null;
+    let pageSize = 4096;
+    let pageCount = 0;
+    let freelistPages = 0;
+    try {
+      const psRow = this.db.prepare("PRAGMA page_size").get();
+      const pcRow = this.db.prepare("PRAGMA page_count").get();
+      const flRow = this.db.prepare("PRAGMA freelist_count").get();
+      pageSize = Number(psRow?.page_size ?? 4096) || 4096;
+      pageCount = Number(pcRow?.page_count ?? 0) || 0;
+      freelistPages = Number(flRow?.freelist_count ?? 0) || 0;
+    } catch {}
+    const dbSizeBytes = stat ? stat.size : pageCount * pageSize;
+    const walSizeBytes = walStat ? walStat.size : 0;
+    const logicalBytes = pageCount * pageSize;
+    const reclaimableBytes = freelistPages * pageSize;
+    const denom = Math.max(dbSizeBytes, logicalBytes);
+    const reclaimablePct = denom > 0 ? Number(((reclaimableBytes / denom) * 100).toFixed(1)) : 0;
+    const lastVacuumRaw = this.getMeta("last_vacuum_ts", null);
+    const lastVacuumTs =
+      lastVacuumRaw !== null && Number.isFinite(Number(lastVacuumRaw)) && Number(lastVacuumRaw) > 0
+        ? Math.floor(Number(lastVacuumRaw))
+        : 0;
+    return {
+      dbSizeBytes,
+      walSizeBytes,
+      pageSize,
+      pageCount,
+      freelistPages,
+      reclaimableBytes,
+      reclaimablePct,
+      lastVacuumTs,
+      lastVacuumAt: lastVacuumTs > 0 ? new Date(lastVacuumTs).toISOString() : null
+    };
+  }
+
+  /**
+   * Threshold-gated SQLite VACUUM + WAL truncate meant for background/idle execution
+   * (never blocks SessionStart). Fail-open on transient lock contention.
+   */
+  maybeAutoVacuum({
+    minReclaimableBytes = 4 * 1024 * 1024,
+    minReclaimablePct = 25,
+    cooldownMs = 24 * 3600 * 1000,
+    force = false
+  } = {}) {
+    try {
+      this.open();
+      const before = this.getStorageHealth();
+      const now = Date.now();
+      if (!force) {
+        if (cooldownMs > 0 && before.lastVacuumTs > 0 && now - before.lastVacuumTs < cooldownMs) {
+          return {
+            ok: true,
+            vacuumed: false,
+            reason: "cooldown",
+            bytesBefore: before.dbSizeBytes + before.walSizeBytes,
+            bytesAfter: before.dbSizeBytes + before.walSizeBytes,
+            reclaimedBytes: 0,
+            storageHealth: before
+          };
+        }
+        if (before.reclaimableBytes < minReclaimableBytes || before.reclaimablePct < minReclaimablePct) {
+          return {
+            ok: true,
+            vacuumed: false,
+            reason: "below_threshold",
+            bytesBefore: before.dbSizeBytes + before.walSizeBytes,
+            bytesAfter: before.dbSizeBytes + before.walSizeBytes,
+            reclaimedBytes: 0,
+            storageHealth: before
+          };
+        }
+      }
+      const bytesBefore = before.dbSizeBytes + before.walSizeBytes;
+      this.db.exec("VACUUM;");
+      try {
+        this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+      } catch {}
+      this.setMeta("last_vacuum_ts", String(Date.now()));
+      const after = this.getStorageHealth();
+      const bytesAfter = after.dbSizeBytes + after.walSizeBytes;
+      return {
+        ok: true,
+        vacuumed: true,
+        reason: force ? "forced" : "threshold_met",
+        bytesBefore,
+        bytesAfter,
+        reclaimedBytes: Math.max(0, bytesBefore - bytesAfter),
+        storageHealth: after
+      };
+    } catch (err) {
+      let current = null;
+      try {
+        current = this.getStorageHealth();
+      } catch {}
+      return {
+        ok: false,
+        vacuumed: false,
+        reason: "busy_or_error",
+        error: String(err && err.message ? err.message : err),
+        bytesBefore: current ? current.dbSizeBytes + current.walSizeBytes : 0,
+        bytesAfter: current ? current.dbSizeBytes + current.walSizeBytes : 0,
+        reclaimedBytes: 0,
+        storageHealth: current
+      };
+    }
+  }
+
   /** Run diagnostic checks */
   doctor() {
     try {
@@ -1064,16 +1178,19 @@ export class SettingsMaintenanceMethods {
       const snapsCheck = this.db.prepare("SELECT count(*) as cnt FROM file_snapshots").get();
       const outlineCheck = this.db.prepare("SELECT count(*) as cnt FROM outline_cache").get();
       const lastMaint = this.getMeta("last_maintenance_ts", null);
-      const stat = fs.existsSync(this.dbPath) ? fs.statSync(this.dbPath) : null;
-      const walPath = `${this.dbPath}-wal`;
-      const walStat = fs.existsSync(walPath) ? fs.statSync(walPath) : null;
+      const storageHealth = this.getStorageHealth();
 
       return {
         status: "HEALTHY",
         allOk: true,
         dbPath: this.dbPath,
-        dbSizeBytes: stat ? stat.size : 0,
-        walSizeBytes: walStat ? walStat.size : 0,
+        dbSizeBytes: storageHealth.dbSizeBytes,
+        walSizeBytes: storageHealth.walSizeBytes,
+        freelistPages: storageHealth.freelistPages,
+        reclaimableBytes: storageHealth.reclaimableBytes,
+        reclaimablePct: storageHealth.reclaimablePct,
+        lastVacuumAt: storageHealth.lastVacuumAt,
+        storageHealth,
         schemaVersion: versionRow ? versionRow.value : "unknown",
         totalChunksIndexed: ftsCheck ? ftsCheck.cnt : 0,
         totalSources: srcCheck ? srcCheck.cnt : 0,
@@ -2023,6 +2140,99 @@ export class SettingsMaintenanceMethods {
     const boolVal = Boolean(enabled && enabled !== "false" && enabled !== "0");
     this.setMeta("watchdog:enabled", boolVal ? "true" : "false");
     return boolVal;
+  }
+
+  /**
+   * Unified effective-value + override-source snapshot for core dashboard settings:
+   * cutoff, cliFilter, readDedup, watchdog, and ttlKeepalive.
+   */
+  getCoreSettingsInfo(sessionId = null) {
+    this.open();
+    const snap = getConfigSnapshot();
+    const cutoff = this.getCutoffInfo(sessionId);
+
+    const resolveScopedBoolMeta = (prefix) => {
+      if (sessionId && sessionId !== "all" && sessionId !== "lifetime") {
+        const sVal = this.getMeta(`${prefix}:session:${sessionId}`);
+        if (sVal !== null) return { saved: sVal !== "false" && sVal !== "0", scope: sessionId === "app" ? "app" : "conversation" };
+        if (sessionId !== "app") {
+          const aVal = this.getMeta(`${prefix}:session:app`);
+          if (aVal !== null) return { saved: aVal !== "false" && aVal !== "0", scope: "app" };
+        }
+      }
+      const gVal = this.getMeta(`${prefix}:global`);
+      if (gVal !== null) return { saved: gVal !== "false" && gVal !== "0", scope: "global" };
+      return { saved: null, scope: null };
+    };
+
+    const buildToggleInfo = (cfgKey, metaPrefix, effectiveBool) => {
+      const cfgDisabled = snap.values[cfgKey] === false;
+      const cfgSource = snap.sources[cfgKey] || "default";
+      const meta = resolveScopedBoolMeta(metaPrefix);
+      if (cfgDisabled && (cfgSource === "env" || cfgSource === "config")) {
+        return {
+          effective: false,
+          saved: meta.saved,
+          effectiveSource: cfgSource,
+          overriddenBy: cfgSource,
+          scope: meta.scope
+        };
+      }
+      if (meta.saved !== null) {
+        return {
+          effective: effectiveBool,
+          saved: meta.saved,
+          effectiveSource: `sqlite:${meta.scope}`,
+          overriddenBy: null,
+          scope: meta.scope
+        };
+      }
+      return {
+        effective: effectiveBool,
+        saved: null,
+        effectiveSource: cfgSource,
+        overriddenBy: null,
+        scope: null
+      };
+    };
+
+    const cliFilter = buildToggleInfo("cliFilter", "cli_filter", this.isCliFilterEnabled(sessionId));
+    const readDedup = buildToggleInfo("readDedup", "read_dedup", this.isReadDedupEnabled(sessionId));
+
+    const wdRaw = this.getMeta("watchdog:enabled", null);
+    const wdSaved = wdRaw !== null ? wdRaw !== "false" && wdRaw !== "0" : null;
+    const wdEffective = this.isWatchdogEnabled();
+    const wdEnvLocked = snap.sources.stallWatchdog === "env";
+    const watchdog = {
+      effective: wdEffective,
+      saved: wdSaved,
+      effectiveSource: wdEnvLocked ? "env" : wdSaved !== null ? "sqlite:user" : snap.sources.stallWatchdog || "default",
+      overriddenBy: wdEnvLocked ? "env" : null
+    };
+
+    const kaRaw = this.getMeta("cache:ttl_keepalive_global_max_count", null);
+    const kaSavedMax =
+      kaRaw !== null && kaRaw !== "" && Number.isFinite(Number(kaRaw)) ? Math.max(0, Math.floor(Number(kaRaw))) : null;
+    const kaEffectiveMax = this.getGlobalTtlKeepaliveMaxCount();
+    const kaEnvLocked =
+      (snap.sources.ttlKeepalive === "env" && snap.values.ttlKeepalive === false) ||
+      snap.sources.ttlKeepaliveMaxCount === "env" ||
+      (snap.sources.ttlKeepalive === "env" && snap.values.ttlKeepalive === true && kaSavedMax === 0);
+    const ttlKeepalive = {
+      effective: kaEffectiveMax >= 1,
+      effectiveMaxCount: kaEffectiveMax,
+      savedMaxCount: kaSavedMax,
+      effectiveSource: kaEnvLocked
+        ? "env"
+        : kaSavedMax !== null
+          ? "sqlite:user"
+          : snap.sources.ttlKeepalive !== "default"
+            ? snap.sources.ttlKeepalive
+            : snap.sources.ttlKeepaliveMaxCount || "default",
+      overriddenBy: kaEnvLocked ? "env" : null
+    };
+
+    return { cutoff, cliFilter, readDedup, watchdog, ttlKeepalive };
   }
 
   /** Check if opt-in desktop stall notifications are enabled (default OFF; env > sqlite toggle > config) */
@@ -3549,15 +3759,20 @@ export class SettingsMaintenanceMethods {
     } catch {}
 
     let vacuumed = false;
-    if (vacuum) {
+    if (vacuum === "auto") {
+      const autoRes = this.maybeAutoVacuum();
+      vacuumed = Boolean(autoRes.vacuumed);
+    } else if (vacuum) {
       try {
         this.db.exec("VACUUM;");
         this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        this.setMeta("last_vacuum_ts", String(Date.now()));
         vacuumed = true;
       } catch {}
     }
 
     const bytesAfter = getDiskSize();
+    const storageHealth = this.getStorageHealth();
 
     return {
       ok: true,
@@ -3567,7 +3782,8 @@ export class SettingsMaintenanceMethods {
       bytesBefore,
       bytesAfter,
       reclaimedBytes: Math.max(0, bytesBefore - bytesAfter),
-      vacuumed
+      vacuumed,
+      storageHealth
     };
   }
 

@@ -631,10 +631,13 @@ function fetchMcpTools(scriptPath, extraEnv = {}, baseEnv = process.env) {
         .filter(Boolean);
       let matchedLine = null;
       let listResp = null;
+      let initResp = null;
       for (const line of lines) {
         try {
           const parsed = JSON.parse(line);
-          if (parsed && parsed.id === 2) {
+          if (parsed && parsed.id === 1 && !initResp) {
+            initResp = parsed;
+          } else if (parsed && parsed.id === 2) {
             matchedLine = line;
             listResp = parsed;
             break;
@@ -645,9 +648,12 @@ function fetchMcpTools(scriptPath, extraEnv = {}, baseEnv = process.env) {
       if (!matchedLine || !Array.isArray(tools)) {
         return reject(new Error(`Incomplete or invalid MCP tools/list response (exit ${code}): ${stderr || stdout}`));
       }
+      const instructions =
+        typeof initResp?.result?.instructions === "string" ? initResp.result.instructions : "";
       resolve({
         rawLine: matchedLine,
-        tools
+        tools,
+        instructions
       });
     });
 
@@ -719,6 +725,61 @@ function measurePreloadedSchemas(rootDir, catalogs) {
     if (eager.length) schemaTokens += estimateTokens(JSON.stringify(eager));
   }
   return { toolCount, schemaTokens };
+}
+
+function measureAgentDiscoveryMetadata(rootDir) {
+  const agentsDir = path.join(rootDir, "agents");
+  const files = [];
+  let bytes = 0;
+  let chars = 0;
+  let tokens = 0;
+  const combinedParts = [];
+
+  if (fs.existsSync(agentsDir)) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(agentsDir, { withFileTypes: true });
+    } catch {}
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
+      if (!ent.isFile() || !/\.md$/i.test(ent.name)) continue;
+      const full = path.join(agentsDir, ent.name);
+      let raw = "";
+      try {
+        raw = fs.readFileSync(full, "utf8");
+      } catch {
+        continue;
+      }
+      const { frontmatter } = splitFrontmatter(raw);
+      const nameMatch = frontmatter.match(/^name\s*:\s*(.+)$/im);
+      const descMatch = frontmatter.match(/^description\s*:\s*(.+)$/im);
+      const name = (nameMatch ? nameMatch[1].trim() : ent.name.replace(/\.md$/i, "")).replace(/^['"]|['"]$/g, "");
+      const description = (descMatch ? descMatch[1].trim() : "").replace(/^['"]|['"]$/g, "");
+      const discoveryText = description ? `${name}: ${description}` : name;
+      const entryBytes = Buffer.byteLength(discoveryText, "utf8");
+      const entryTokens = estimateTokens(discoveryText);
+      bytes += entryBytes;
+      chars += discoveryText.length;
+      tokens += entryTokens;
+      combinedParts.push(discoveryText);
+      files.push({
+        file: `agents/${ent.name}`,
+        name,
+        bytes: entryBytes,
+        chars: discoveryText.length,
+        tokens: entryTokens
+      });
+    }
+  }
+
+  return {
+    agentCount: files.length,
+    files,
+    bytes,
+    chars,
+    tokens,
+    sha256: sha256Hex(combinedParts.join("\n"))
+  };
 }
 
 export async function auditPrefixBudget(rootDir = REPO_ROOT, options = {}) {
@@ -855,13 +916,40 @@ export async function auditPrefixBudget(rootDir = REPO_ROOT, options = {}) {
       fullSha256: sha256Hex(startupText)
     };
 
+    const fastInstructionsText = typeof fastRes.instructions === "string" ? fastRes.instructions : "";
+    const ctxInstructionsText = typeof ctxRes.instructions === "string" ? ctxRes.instructions : "";
+    const combinedInstructionsText = [fastInstructionsText, ctxInstructionsText].filter(Boolean).join("\n");
+    const mcpInstructions = {
+      bytes: Buffer.byteLength(combinedInstructionsText, "utf8"),
+      chars: combinedInstructionsText.length,
+      tokens: estimateTokens(combinedInstructionsText),
+      sha256: sha256Hex(combinedInstructionsText),
+      fast: {
+        bytes: Buffer.byteLength(fastInstructionsText, "utf8"),
+        chars: fastInstructionsText.length,
+        tokens: estimateTokens(fastInstructionsText)
+      },
+      context: {
+        bytes: Buffer.byteLength(ctxInstructionsText, "utf8"),
+        chars: ctxInstructionsText.length,
+        tokens: estimateTokens(ctxInstructionsText)
+      }
+    };
+    const agentMetadata = measureAgentDiscoveryMetadata(rootDir);
+    const metadataTokens = mcpInstructions.tokens + agentMetadata.tokens;
+
     const totalBytes = brake.bytes + reference.frontmatterBytes + tools.bytes + startup.bytes;
     const totalChars = brake.chars + reference.frontmatterChars + tools.chars + startup.chars;
     const totalTokens = brake.tokens + reference.frontmatterTokens + tools.tokens + startup.tokens;
+    const totalTokensWithMetadata = totalTokens + metadataTokens;
     const preloaded = measurePreloadedSchemas(rootDir, { fast: fastRes.tools, context: ctxRes.tools });
     const configuredStartup = preloaded && {
       ...preloaded,
-      estimatedTokens: brake.tokens + reference.frontmatterTokens + startup.tokens + preloaded.schemaTokens
+      estimatedTokens: brake.tokens + reference.frontmatterTokens + startup.tokens + preloaded.schemaTokens,
+      mcpInstructionsTokens: mcpInstructions.tokens,
+      agentMetadataTokens: agentMetadata.tokens,
+      estimatedTokensWithMetadata:
+        brake.tokens + reference.frontmatterTokens + startup.tokens + preloaded.schemaTokens + metadataTokens
     };
     const stableOnlyTokens = brake.tokens + reference.frontmatterTokens + tools.tokens + stableTokens;
     const errorBandPct = ESTIMATOR_ERROR_BAND_PCT;
@@ -888,6 +976,8 @@ export async function auditPrefixBudget(rootDir = REPO_ROOT, options = {}) {
       totalBytes,
       totalChars,
       totalTokens,
+      metadataTokens,
+      totalTokensWithMetadata,
       errorBandPct,
       upperBoundTokens,
       exceedsBudget,
@@ -898,7 +988,9 @@ export async function auditPrefixBudget(rootDir = REPO_ROOT, options = {}) {
         brake,
         reference,
         tools,
-        startup
+        startup,
+        mcpInstructions,
+        agentMetadata
       }
     });
   } finally {
@@ -909,7 +1001,7 @@ export async function auditPrefixBudget(rootDir = REPO_ROOT, options = {}) {
 }
 
 function formatHumanReport(report) {
-  const { brake, reference, tools, startup } = report.blocks;
+  const { brake, reference, tools, startup, mcpInstructions, agentMetadata } = report.blocks;
   const startupModeNote = report.stablePrefixOnly ? " [stable-only]" : "";
   const auxNote =
     (reference.auxFileCount || 0) > 0
@@ -925,10 +1017,20 @@ function formatHumanReport(report) {
     `| 3. tools (fast) | \`fast/mcp-server.mjs\` (${tools.fast.toolCount} tools) | ${tools.fast.bytes} | ${tools.fast.chars} | ${tools.fast.tokens} | sha256:${tools.fast.sha256.slice(0, 12)} |`,
     `| 3. tools (context) | \`context/server.js\` (${tools.context.toolCount} tools) | ${tools.context.bytes} | ${tools.context.chars} | ${tools.context.tokens} | sha256:${tools.context.sha256.slice(0, 12)} |`,
     `| 4. startup | \`hooks/session-start.mjs\`${startupModeNote} | ${startup.bytes} | ${startup.chars} | ${startup.tokens} | stable: ${startup.stablePct}% (${startup.stableBytes} B) / volatile Git tail: ${startup.volatilePct}% (${startup.volatileBytes} B) |`,
-    `| **Full catalog + prefix** | All tool definitions | **${report.totalBytes}** | **${report.totalChars}** | **${report.totalTokens}** | budget <= ${report.budgetLimitTokens} tok (±${report.errorBandPct}% band -> <= ${report.upperBoundTokens} tok; stable-only: ${report.stableOnlyTokens} tok) |`,
+    ...(mcpInstructions
+      ? [
+          `| 5. mcp instructions | \`initialize.result.instructions\` | ${mcpInstructions.bytes} | ${mcpInstructions.chars} | ${mcpInstructions.tokens} | fast: ${mcpInstructions.fast.tokens} tok, context: ${mcpInstructions.context.tokens} tok |`
+        ]
+      : []),
+    ...(agentMetadata
+      ? [
+          `| 6. agents metadata | \`agents/*.md\` (${agentMetadata.agentCount} agents) | ${agentMetadata.bytes} | ${agentMetadata.chars} | ${agentMetadata.tokens} | discovery name+description |`
+        ]
+      : []),
+    `| **Full catalog + prefix** | All tool definitions | **${report.totalBytes}** | **${report.totalChars}** | **${report.totalTokens}** | budget <= ${report.budgetLimitTokens} tok (±${report.errorBandPct}% band -> <= ${report.upperBoundTokens} tok; stable-only: ${report.stableOnlyTokens} tok; incl. metadata: ${report.totalTokensWithMetadata ?? report.totalTokens} tok) |`,
     "",
     report.configuredStartup
-      ? `Configured Antigravity startup: ~${report.configuredStartup.estimatedTokens} plugin tokens including ${report.configuredStartup.toolCount} preloaded tool definitions. Host wrappers and discovery metadata are excluded.`
+      ? `Configured Antigravity startup: ~${report.configuredStartup.estimatedTokens} plugin tokens including ${report.configuredStartup.toolCount} preloaded tool definitions (~${report.configuredStartup.estimatedTokensWithMetadata ?? report.configuredStartup.estimatedTokens} tok incl. MCP instructions & agent discovery metadata). Host wrappers are excluded.`
       : "Configured startup estimate unavailable (no mcp_config.json).",
     "",
     `Tools Fingerprint (SHA-256): ${report.toolsFingerprint}`,

@@ -31,6 +31,7 @@ import {
   createStandaloneServer,
   registerSidecarRoutes
 } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 suppressSqliteExperimentalWarning();
 
@@ -604,7 +605,7 @@ test("v1.5.4-3: Sidecar /api/watchdog/action focusConversation & ackJump auth, v
 });
 
 test("v1.5.4-4: Sidecar index.html VM test — alert & session-switcher click/Enter jump, workspace-priority pendingJump claim, 1200ms fallback & XSS safety", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch && scriptMatch[1]);
 
@@ -1030,7 +1031,7 @@ test("v1.5.4-4: Sidecar index.html VM test — alert & session-switcher click/En
 });
 
 test("v1.5.4-5: Sidecar edge-case regressions — hanging getWorkspaceUris timeout, subproject vs umbrella isolation, rapid-click race, Desktop 2.0 onWorkspaceChange & sessionStorage reload guard", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch && scriptMatch[1]);
 

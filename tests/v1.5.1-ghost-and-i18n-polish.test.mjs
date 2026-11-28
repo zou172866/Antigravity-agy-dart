@@ -9,6 +9,7 @@ import vm from "node:vm";
 
 import { ContextModeStore } from "../context/lib/store.js";
 import { GHOST_RECALL_WINDOW_MS } from "../context/lib/store/reads.js";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -287,7 +288,7 @@ test("v1.5.1-3: Host-cap cutoffs (45 KB & 64 KB) emit use_outlines_or_exempt and
 });
 
 test("v1.5.1-4: Sidecar index.html Chinese mode ('zh') has zero residual English across ghost advice, cutoff options, TTL sources, loop watch & bust tooltips", async () => {
-  const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   assert.ok(scriptMatches.length >= 1, "Expected inline <script> in index.html");
   const mainScript = scriptMatches[scriptMatches.length - 1][1];

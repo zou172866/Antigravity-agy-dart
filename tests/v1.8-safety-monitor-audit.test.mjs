@@ -29,6 +29,7 @@ import {
   resetSidecarSafetyAuditCache
 } from "../sidecars/dashboard/server.mjs";
 import { auditEnvironmentCache, auditSafetyMonitorOnly } from "../scripts/cache-audit.mjs";
+import { fetchDashboardHtml, readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -596,10 +597,8 @@ test("6. Sidecar /api/safety-audit (standalone CSRF + SidecarApp POST-only) and 
     assert.equal(body.window.heavyMaxChars, 299876);
     assert.ok(typeof body.markdown === "string" && body.markdown.includes("Safety Monitor Quota-Burn Audit"));
 
-    // HTML includes Safety Monitor card
-    const htmlRes = await fetch(`http://127.0.0.1:${port}/`);
-    assert.equal(htmlRes.status, 200);
-    const html = await htmlRes.text();
+    // HTML includes Safety Monitor card and UI scripts call /api/safety-audit
+    const html = await fetchDashboardHtml(`http://127.0.0.1:${port}`);
     assert.ok(html.includes('id="safety-audit-card"'));
     assert.ok(html.includes("/api/safety-audit"));
 
@@ -682,7 +681,7 @@ test("6. Sidecar /api/safety-audit (standalone CSRF + SidecarApp POST-only) and 
 
 test("7. Dashboard Safety Monitor plain-language UX: narrow-header CSS, calm-recent vs active-burst severity, human duration & zero-truncation suppression", async () => {
   const vm = await import("node:vm");
-  const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
 
   // Layout invariants: prevent 3-line vertical title squash & clipped badge in narrow sidebars
   assert.ok(html.includes(".safety-head-left .band-title"), "CSS must protect title/badge from flexing/clipping");
@@ -1057,7 +1056,7 @@ test("8. v1.8.2 quota-saving optimizations: in-workspace zero-check inline outli
     assert.equal(sentAlerts.length, 1);
 
     // 8d. Dashboard synergy tip + desktop notify chip + 2-step guided handoff hint
-    const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     const scriptMatches = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];
     const mainScript = scriptMatches.map((m) => m[1]).find((s) => s.includes("function renderSafetyContextSynergyTip"));
     assert.ok(mainScript, "Dashboard script must define renderSafetyContextSynergyTip");

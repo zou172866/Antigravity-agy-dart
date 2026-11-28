@@ -32,6 +32,7 @@ import {
 } from "../context/lib/watchdog.js";
 import { handleStopPayload } from "../hooks/stop.mjs";
 import { closeRuntimeStore, createStandaloneServer } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -765,7 +766,7 @@ test("v1.5-5: Decoupled stallWatchdog=false + ttlDesktopNotify=true, env precede
     resetConfigCache();
 
     // 3. Verify index.html #kv-ttl-notify-btn & toggleTtlNotify() + cross-session ttlCalibration tooltip in VM
-    const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     assert.ok(html.includes('id="kv-ttl-notify-btn"'));
     const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)];
     const mainScript = scriptMatches[scriptMatches.length - 1][1];

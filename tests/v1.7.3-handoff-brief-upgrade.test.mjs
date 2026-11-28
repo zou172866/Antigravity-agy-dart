@@ -42,6 +42,7 @@ import {
   createStandaloneServer,
   registerSidecarRoutes
 } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -110,7 +111,7 @@ function httpJsonRequest(port, reqPath, { method = "GET", headers = {}, body = u
 }
 
 function createDashboardVmSandbox({ fetchImpl, initialSearch = "", sidecarObj = undefined, copiedOut = [] } = {}) {
-  const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   assert.ok(scriptMatches.length >= 1, "index.html must contain inline <script>");
   const mainScript = scriptMatches[0][1];

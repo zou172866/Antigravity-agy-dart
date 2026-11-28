@@ -30,6 +30,7 @@ import {
 } from "../sidecars/dashboard/server.mjs";
 import vm from "node:vm";
 import { suppressSqliteExperimentalWarning } from "../hooks/compile-cache.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 suppressSqliteExperimentalWarning();
 
@@ -654,7 +655,7 @@ test("v1.5.4-ka-3: Edge cases — un-flushed transcript PLANNER_RESPONSE boundar
 });
 
 test("v1.5.4-ka-4: Sidecar index.html VM test — renderKeepaliveControls (ZH/EN), toggle, maxCount clamping & multi-window reset target", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch && scriptMatch[1]);
 
@@ -1103,7 +1104,7 @@ test("v1.5.4-ka-5: Empirical TTL floor (>= profileTtl) prevents premature ~90s k
 });
 
 test("v1.5.4-ka-6: Sidecar index.html — hidden scope bar (conversation-only), Band 1 framed Current Context spotlight with distinct background & synthesized metrics", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
 
   // 1. Scope bar & telemetry scope banner are hidden; Band 1 is #kv-cache-card with #ctx-overview-box & #ctx-spotlight-box
   assert.match(htmlSrc, /<div id="scope-switcher-row"[^>]*class="[^"]*\bhidden\b[^"]*"[^>]*\bhidden\b/);
@@ -1478,7 +1479,7 @@ test("v1.5.4-ka-7: Review hardening — cold ring-buffer eviction guard, SYSTEM_
     }
 
     // 5. Band 1 strict position above #star-milestone-banner & Dark-Host CSS color inheritance guard
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     assert.ok(
       htmlSrc.indexOf('id="kv-cache-card"') < htmlSrc.indexOf('id="star-milestone-banner"'),
       "#kv-cache-card must appear strictly above #star-milestone-banner as Band 1"
@@ -1491,7 +1492,7 @@ test("v1.5.4-ka-7: Review hardening — cold ring-buffer eviction guard, SYSTEM_
 });
 
 test("v1.5.4-ka-8: Sticky topbar keepalive capsule & strict per-conversation window isolation (legacy global DB scrub, multi-window Watchdog/Hooks/API, and Sidecar tab switching)", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
 
   // 1. Sticky Topbar placement: #kv-keepalive-group lives inside <header class="topbar"> side-by-side with #toggle-active-btn inside .topbar-pills
   const headerStart = htmlSrc.indexOf('<header class="topbar">');
@@ -1960,7 +1961,7 @@ test("v1.5.4-ka-8: Sticky topbar keepalive capsule & strict per-conversation win
 });
 
 test("v1.5.4-ka-9: Review hardening — SidecarApp app.config.conversationId isolation, Turn-0 __unbound__ migration, pruneByTtl override preservation, out-of-order action race & setLanguage guard", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
 
   // 1. Responsive sticky .topbar layout: .topbar-pills is a direct sibling between .brand-group and .header-actions (no 3-row nesting)
   const headerStart = htmlSrc.indexOf('<header class="topbar">');
@@ -2332,7 +2333,7 @@ test("v1.5.4-ka-9: Review hardening — SidecarApp app.config.conversationId iso
 });
 
 test("v1.5.4-ka-10: Multi-layer subagent keepalive suppression — summary DB, transcript genesis, legacy lease self-heal, sendSidecarKeepaliveMessage firewall & Sidecar UI isolation", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ka-subagent-"));
   const dbPath = path.join(tmpDir, "context.db");
   const cfgPath = path.join(tmpDir, "config.json");
@@ -2972,7 +2973,7 @@ test("v1.5.4-ka-10: Multi-layer subagent keepalive suppression — summary DB, t
 });
 
 test("v1.5.4-ka-11: Review hardening — real CortexTrajectoryMetadata workflow firewall, zero negative-cache poisoning, Stop auto-txPath, custom-profile Turn-0 human safety, orphan keepalive scrub & standalone active-subagent UI guard", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ka-review-"));
   const dbPath = path.join(tmpDir, "context.db");
   const cfgPath = path.join(tmpDir, "config.json");
@@ -4434,7 +4435,7 @@ test("v1.5.4-ka-13: Global keepalive maxCount (0..20), per-window override vs fo
     });
 
     // 3. Sidecar HTML layout order & Frontend VM integration against live HTTP server (ZH/EN, custom badge, clear-to-follow-global, `__unbound__` tab)
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const idxCard = htmlSrc.indexOf('id="kv-cache-card"');
     const idxGlobalGroup = htmlSrc.indexOf('id="kv-global-keepalive-group"');
     const idxTtlNotifyBtn = htmlSrc.indexOf('id="kv-ttl-notify-btn"');
@@ -5445,7 +5446,7 @@ test("v1.5.4-ka-14: Cloud clock alignment + 60s lead + delivery EMA, default 1x,
     }
 
     // 5. Sidecar HTTP API validation + Accordion placement + VM live k-value & cold-miss rendering
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const idxAccordion = htmlSrc.indexOf('id="exempt-accordion"');
     const idxAccordionEnd = htmlSrc.indexOf("</details>", idxAccordion);
     const idxMinCtxCtrl = htmlSrc.indexOf('id="ka-min-ctx-control"');
@@ -6205,7 +6206,7 @@ test("v1.5.4-ka-15: Hardened multi-tool causal cacheOriginTs, clock skew bounds,
     }
 
     // 6. Sidecar Server + VM: Layer-2 anti-poisoning, Turn-0 /api/cache-diag backfill, narrow CSS, below-min tooltip, Enter 1x override, env-pin focused snapback & concurrent 500 reconciliation
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     assert.match(htmlSrc, /\.cutoff-control\s*\{[^}]*flex-wrap:\s*wrap/s, ".cutoff-control must wrap cleanly on narrow Sidecar widths");
     assert.match(htmlSrc, /\.cutoff-num-input\s*\{[^}]*width:\s*48px/s, ".cutoff-num-input must fit 3-digit 100% cleanly");
     assert.match(htmlSrc, /#ka-min-ctx-label,\s*#ka-min-ctx-k-hint\s*\{[^}]*white-space:\s*nowrap/s);

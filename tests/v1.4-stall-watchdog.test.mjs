@@ -30,6 +30,7 @@ import {
   resolveDynamicThresholds
 } from "../context/lib/watchdog.js";
 import { closeRuntimeStore, createStandaloneServer, registerSidecarRoutes } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -875,7 +876,7 @@ test("v1.4-7: Sidecar /api/watchdog & /api/watchdog/action CSRF/POST-only securi
     assert.ok(serverSrc.includes('app.api("/api/watchdog"'));
     assert.ok(serverSrc.includes('app.api("/api/watchdog/action"'));
 
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     assert.ok(htmlSrc.includes('id="watchdog-card"'));
     assert.ok(htmlSrc.includes('id="wd-rescue-box"'));
     assert.ok(htmlSrc.includes('id="wd-copy-rescue-btn"'));
@@ -1551,7 +1552,7 @@ test("v1.4-9: Production Sidecar env > sqlite precedence, UI disable clears leas
 });
 
 test("v1.4-10: Dashboard index.html Watchdog UI DOM execution — 1s ticker escalation, sleep-wake flash guard, EN/ZH switch, XSS neutralization & Rescue Brief actions", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch && scriptMatch[1]);
 

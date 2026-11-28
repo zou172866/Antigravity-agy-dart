@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getHeader } from "./http-helpers.mjs";
 
 export const REPO = "zou172866/Antigravity-agy-dart";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
@@ -76,16 +77,6 @@ export function readLocalVersion(pluginRoot = DEFAULT_PLUGIN_ROOT) {
     }
   }
   return "";
-}
-
-function getHeader(headers, name) {
-  if (!headers) return null;
-  if (typeof headers.get === "function") return headers.get(name);
-  const lower = name.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === lower) return v == null ? null : String(v);
-  }
-  return null;
 }
 
 function getRetryAt(headers, currentNow) {

@@ -1289,7 +1289,7 @@ export async function processPostToolPayload(rawPayload) {
       const [{ ContextModeStore }, { redactSecrets }, watchdogLeaseMod, filterRulesMod] = await Promise.all([
         import("../context/lib/store.js"),
         import("../context/lib/security.js"),
-        shouldTouchWatchdog ? import("../context/lib/watchdog-lease.js") : Promise.resolve(null),
+        shouldTouchWatchdog ? import("../context/lib/watchdog-lease-core.js") : Promise.resolve(null),
         verifySignal && !verifySignal.passed && verifySignal.failureSection
           ? import("./filter-rules.mjs")
           : Promise.resolve(null)

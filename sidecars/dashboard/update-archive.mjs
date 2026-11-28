@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
+import { getHeader } from "./http-helpers.mjs";
 
 export class UpdateError extends Error {
   constructor(reason) {
@@ -18,16 +19,6 @@ const ALLOWED_HOSTS = new Set([
 ]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const unzip = promisify(gunzip);
-
-function getHeader(headers, name) {
-  if (!headers) return null;
-  if (typeof headers.get === "function") return headers.get(name);
-  const lower = name.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === lower) return v == null ? null : String(v);
-  }
-  return null;
-}
 
 /**
  * Verify a downloaded archive buffer against an expected hex SHA-256 digest.

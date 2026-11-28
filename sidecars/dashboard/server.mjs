@@ -6,14 +6,26 @@ import http from "node:http";
 import os from "node:os";
 import { execFile, execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { VERSION_ROUTE, createVersionChecker, parseVersion, readLocalVersion } from "./version-check.mjs";
+import { VERSION_ROUTE, readLocalVersion } from "./version-check.mjs";
+import { UPDATE_MARKER_NAME, UPDATE_ROUTE, hasActiveUpdateMarker } from "./version-update.mjs";
 import {
-  UPDATE_MARKER_NAME,
-  UPDATE_ROUTE,
-  createPluginUpdater,
-  evaluateAutoInstallEligibility,
-  hasActiveUpdateMarker
-} from "./version-update.mjs";
+  isAllowedHostHeader,
+  isAllowedOriginHeader,
+  isAllowedRefererHeader,
+  isCrossSiteFetchHeader,
+  isJsonContentType,
+  isUncPath,
+  MAX_REQUEST_BODY_BYTES,
+  readBoundedJsonBody,
+  resolveStandalonePort,
+  resolveTargetSession,
+  sendJson,
+  shouldUseSidecarApp,
+  timingSafeTokenMatch,
+  validateAndNormalizeSearchInput,
+  validateStringFields
+} from "./http-security.mjs";
+import { AUTO_UPDATE_ROUTE, createUpdateCoordinator } from "./update-coordinator.mjs";
 import { getConfigSnapshot, getEffectiveConfig } from "../../context/lib/config.js";
 import {
   clearConversationApiBackoff,
@@ -80,9 +92,30 @@ const { ContextModeStore, FILE_CATEGORIES } = await import("../../context/lib/st
 const __selfPath = path.resolve(fileURLToPath(import.meta.url));
 const __dirname = path.dirname(__selfPath);
 const HTML_FILE = path.join(__dirname, "index.html");
-export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
-const OVERSIZED_BODY_DRAIN_TIMEOUT_MS = 5_000;
+const UI_DIR = path.join(__dirname, "ui");
+export const UI_STATIC_ASSETS = Object.freeze({
+  "/ui/styles.css": Object.freeze({ file: path.join(UI_DIR, "styles.css"), contentType: "text/css; charset=utf-8" }),
+  "/ui/theme-init.js": Object.freeze({ file: path.join(UI_DIR, "theme-init.js"), contentType: "application/javascript; charset=utf-8" }),
+  "/ui/i18n.js": Object.freeze({ file: path.join(UI_DIR, "i18n.js"), contentType: "application/javascript; charset=utf-8" }),
+  "/ui/search-state.js": Object.freeze({ file: path.join(UI_DIR, "search-state.js"), contentType: "application/javascript; charset=utf-8" }),
+  "/ui/theme-nav.js": Object.freeze({ file: path.join(UI_DIR, "theme-nav.js"), contentType: "application/javascript; charset=utf-8" }),
+  "/ui/app.js": Object.freeze({ file: path.join(UI_DIR, "app.js"), contentType: "application/javascript; charset=utf-8" })
+});
+const uiAssetCache = new Map();
 const SIDECAR_CSRF_TOKEN = crypto.randomBytes(24).toString("hex");
+export {
+  AUTO_UPDATE_ROUTE,
+  isAllowedHostHeader,
+  isAllowedOriginHeader,
+  isAllowedRefererHeader,
+  isCrossSiteFetchHeader,
+  isJsonContentType,
+  MAX_REQUEST_BODY_BYTES,
+  readBoundedJsonBody,
+  resolveStandalonePort,
+  shouldUseSidecarApp,
+  timingSafeTokenMatch
+};
 
 let _runtimeStore = null;
 let _appStartTime = null;
@@ -408,9 +441,7 @@ export function closeRuntimeStore() {
   clearConversationApiBackoff();
   cachedSafetyAudit = { ts: 0, report: null };
   resetSafetyAuditCache();
-  _updateInFlight = false;
-  _updateRestartScheduled = false;
-  _autoCycleInFlight = null;
+  updateCoordinator.resetUpdateState();
   if (_runtimeStore) {
     try {
       _runtimeStore.close();
@@ -440,162 +471,61 @@ function getRuntimeStore() {
   return _runtimeStore;
 }
 
-const LOCAL_HOST_RE = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
-const LOCAL_ORIGIN_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
-
-export function isAllowedHostHeader(hostHeader) {
-  if (typeof hostHeader !== "string") return false;
-  return LOCAL_HOST_RE.test(hostHeader.trim());
-}
-
-export function isAllowedOriginHeader(originHeader, hostHeader = null) {
-  if (originHeader === undefined || originHeader === null || originHeader === "") return true;
-  if (typeof originHeader !== "string") return false;
-  const trimmed = originHeader.trim();
-  if (!LOCAL_ORIGIN_RE.test(trimmed)) return false;
-  try {
-    const originUrl = new URL(trimmed);
-    if (originUrl.protocol !== "http:") return false;
-    if (typeof hostHeader === "string" && hostHeader.trim()) {
-      const reqHostUrl = new URL(`http://${hostHeader.trim()}`);
-      if (originUrl.hostname.toLowerCase() !== reqHostUrl.hostname.toLowerCase()) return false;
-      const originPort = originUrl.port || "80";
-      const hostPort = reqHostUrl.port || "80";
-      if (originPort !== hostPort) return false;
-    }
-  } catch {
-    return false;
-  }
-  return true;
-}
-
-export function isAllowedRefererHeader(refererHeader, hostHeader = null) {
-  if (refererHeader === undefined || refererHeader === null || refererHeader === "") return true;
-  if (typeof refererHeader !== "string") return false;
-  const trimmed = refererHeader.trim();
-  if (!trimmed) return true;
-  try {
-    const refUrl = new URL(trimmed);
-    return isAllowedOriginHeader(refUrl.origin, hostHeader);
-  } catch {
-    return false;
-  }
-}
-
-export function isCrossSiteFetchHeader(secFetchSite, { allowSameSite = false } = {}) {
-  if (secFetchSite === undefined || secFetchSite === null) return false;
-  if (typeof secFetchSite !== "string") return true;
-  const normalized = secFetchSite.trim().toLowerCase();
-  if (!normalized || normalized === "same-origin" || normalized === "none") return false;
-  if (allowSameSite && normalized === "same-site") return false;
-  return true;
-}
-
-export function isJsonContentType(contentType) {
-  return typeof contentType === "string" && /^application\/json(?:\s*;|$)/i.test(contentType.trim());
-}
-
-export function timingSafeTokenMatch(provided, expected) {
-  if (typeof provided !== "string" || typeof expected !== "string" || !provided || !expected) {
-    return false;
-  }
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-function discardOversizedBody(req) {
-  req.resume();
-  if (req.complete || req.destroyed) return;
-  // Let a normal upload finish after the 413, but bound time spent draining an unfinished one.
-  const timer = setTimeout(() => {
-    if (!req.complete && !req.destroyed) req.destroy();
-  }, OVERSIZED_BODY_DRAIN_TIMEOUT_MS);
-  timer.unref();
-  const cancelTimer = () => clearTimeout(timer);
-  req.once("end", cancelTimer);
-  req.once("close", cancelTimer);
-}
-
-export function readBoundedJsonBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
-  return new Promise((resolve) => {
-    const rawContentLen = req.headers?.["content-length"];
-    if (rawContentLen !== undefined) {
-      const declaredLen = Number(rawContentLen);
-      if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
-        req.on("error", () => {});
-        discardOversizedBody(req);
-        resolve({ ok: false, status: 413, error: `Request body exceeds ${Math.round(maxBytes / 1024)} KB limit` });
-        return;
-      }
-    }
-    const chunks = [];
-    let totalBytes = 0;
-    let settled = false;
-    let overflowed = false;
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
-
-    req.on("data", (chunk) => {
-      if (overflowed) return;
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-      totalBytes += buf.length;
-      if (totalBytes > maxBytes) {
-        overflowed = true;
-        chunks.length = 0;
-        discardOversizedBody(req);
-        finish({ ok: false, status: 413, error: `Request body exceeds ${Math.round(maxBytes / 1024)} KB limit` });
-        return;
-      }
-      chunks.push(buf);
-    });
-
-    req.on("end", () => {
-      if (overflowed || settled) return;
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (!raw) {
-        finish({ ok: true, data: {} });
-        return;
-      }
-      try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          finish({ ok: false, status: 400, error: "Request body must be a JSON object" });
-          return;
-        }
-        finish({ ok: true, data: parsed });
-      } catch (err) {
-        finish({ ok: false, status: 400, error: err instanceof Error ? err.message : "Invalid JSON body" });
-      }
-    });
-
-    req.on("error", (err) => {
-      finish({ ok: false, status: 400, error: err instanceof Error ? err.message : "Request stream error" });
-    });
-
-    req.on("aborted", () => {
-      finish({ ok: false, status: 400, error: "Request stream aborted" });
-    });
-
-    req.on("close", () => {
-      if (!settled && !req.complete) {
-        finish({ ok: false, status: 400, error: "Request stream closed prematurely" });
-      }
-    });
-  });
-}
-
 let cachedPkgVersion = null;
 let cachedHtmlTemplate = { mtimeMs: -1, size: -1, withVer: "" };
 
 export function invalidateVersionCache() {
   cachedPkgVersion = null;
   cachedHtmlTemplate = { mtimeMs: -1, size: -1, withVer: "" };
+  uiAssetCache.clear();
+}
+
+export function getStaticUiAsset(pathname) {
+  if (typeof pathname !== "string" || !Object.prototype.hasOwnProperty.call(UI_STATIC_ASSETS, pathname)) {
+    return null;
+  }
+  const spec = UI_STATIC_ASSETS[pathname];
+  try {
+    const st = fs.statSync(spec.file);
+    const cached = uiAssetCache.get(pathname);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+      return { contentType: spec.contentType, body: cached.body };
+    }
+    const body = fs.readFileSync(spec.file, "utf8");
+    uiAssetCache.set(pathname, { mtimeMs: st.mtimeMs, size: st.size, body });
+    return { contentType: spec.contentType, body };
+  } catch {
+    return null;
+  }
+}
+
+export function registerSidecarUiAssets(app, ResponseCtor = null) {
+  if (!app || typeof app.page !== "function") return;
+  for (const [routePath, spec] of Object.entries(UI_STATIC_ASSETS)) {
+    app.page(routePath, () => {
+      const asset = getStaticUiAsset(routePath);
+      if (!asset) {
+        return ResponseCtor
+          ? new ResponseCtor("Not Found", {
+              contentType: "text/plain; charset=utf-8",
+              status: 404,
+              headers: { "X-Content-Type-Options": "nosniff" }
+            })
+          : "";
+      }
+      if (ResponseCtor) {
+        return new ResponseCtor(asset.body, {
+          contentType: spec.contentType,
+          status: 200,
+          headers: {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff"
+          }
+        });
+      }
+      return asset.body;
+    });
+  }
 }
 
 function getPackageVersion() {
@@ -629,68 +559,7 @@ function getRenderedHtml(csrfToken = SIDECAR_CSRF_TOKEN) {
   return withVer.includes("</head>") ? withVer.replace("</head>", tokenMeta) : withVer;
 }
 
-const MAX_SEARCH_QUERIES = 20;
-const MAX_SEARCH_QUERY_CHARS = 256;
-
-function isUncPath(p) {
-  return typeof p === "string" && /^[\\/]{2}/.test(p.trim());
-}
-
-function validateStringFields(data, fields) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return { ok: true };
-  for (const field of fields) {
-    const val = data[field];
-    if (val !== undefined && val !== null && typeof val !== "string") {
-      return { ok: false, error: `Field '${field}' must be a string` };
-    }
-  }
-  return { ok: true };
-}
-
-function validateAndNormalizeSearchInput(data) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { ok: false, error: "Request body must be a JSON object" };
-  }
-  if (data.queries !== undefined) {
-    if (!Array.isArray(data.queries)) {
-      return { ok: false, error: "Field 'queries' must be an array of strings" };
-    }
-    if (data.queries.length > MAX_SEARCH_QUERIES) {
-      return { ok: false, error: `At most ${MAX_SEARCH_QUERIES} search queries are allowed per request` };
-    }
-    const queries = [];
-    for (const q of data.queries) {
-      if (typeof q !== "string") {
-        return { ok: false, error: "Each item in 'queries' must be a string" };
-      }
-      queries.push(q.slice(0, MAX_SEARCH_QUERY_CHARS));
-    }
-    return { ok: true, queries };
-  }
-  if (data.query !== undefined && data.query !== null && typeof data.query !== "string") {
-    return { ok: false, error: "Field 'query' must be a string" };
-  }
-  return { ok: true, queries: [typeof data.query === "string" ? data.query.slice(0, MAX_SEARCH_QUERY_CHARS) : ""] };
-}
-
-function resolveTargetSession(data, defaultConvId = "default") {
-  const safeSessionId = typeof data?.sessionId === "string" ? data.sessionId : "";
-  const safeConvId = typeof data?.conversationId === "string" ? data.conversationId : "";
-  const rawScope = typeof data?.scope === "string" && data.scope.trim() ? data.scope.trim() : "";
-  const scope =
-    rawScope === "all"
-      ? "lifetime"
-      : rawScope === "session"
-        ? "app"
-        : rawScope || (safeSessionId === "all" ? "lifetime" : safeSessionId === "app" ? "app" : "conversation");
-  const convId =
-    safeConvId ||
-    (safeSessionId && safeSessionId !== "all" && safeSessionId !== "app" ? safeSessionId : defaultConvId || "default");
-  let targetSid = convId;
-  if (scope === "lifetime" || scope === "all") targetSid = "all";
-  else if (scope === "app" || scope === "session") targetSid = "app";
-  return { scope, convId, targetSid };
-}
+// HTTP header/body/session validators imported from ./http-security.mjs
 
 const claimedTranscriptStatCache = new Map(); // `${dbPath}|${txPath}` -> `${mtimeMs}:${size}`
 const MAX_CLAIMED_TX_CACHE_ENTRIES = 128;
@@ -895,6 +764,16 @@ function getStatsPayload(data, defaultConvId = "default") {
   stats.isPaused = store.isPaused(targetSid);
   stats.cliFilterEnabled = store.isCliFilterEnabled(targetSid);
   stats.readDedupEnabled = store.isReadDedupEnabled(targetSid);
+  try {
+    stats.settingsInfo = typeof store.getCoreSettingsInfo === "function" ? store.getCoreSettingsInfo(targetSid) : null;
+  } catch {
+    stats.settingsInfo = null;
+  }
+  try {
+    stats.storageHealth = typeof store.getStorageHealth === "function" ? store.getStorageHealth() : null;
+  } catch {
+    stats.storageHealth = null;
+  }
   const sinceOpts = scope === "app" || scope === "session" ? { sinceTs: appStartTime } : {};
   stats.ghost = store.getGhostStats(statsTargetSid, sinceOpts);
   stats.featureRoi = store.getFeatureRoi(statsTargetSid, { ...sinceOpts, ghost: stats.ghost });
@@ -2805,44 +2684,6 @@ function handleWatchdogActionMutation(data = {}, defaultConvId = "default") {
 
 export { isSameFilePath };
 
-/**
- * Only allow SidecarApp mode when ANTIGRAVITY_SIDECAR_UI_TOKEN is explicitly non-empty
- * (sidecar_sdk fails open on authentication when its token is empty/missing).
- */
-export function shouldUseSidecarApp(env = process.env, hasSidecarApp = true) {
-  return Boolean(
-    hasSidecarApp &&
-      typeof env?.ANTIGRAVITY_LS_ADDRESS === "string" && env.ANTIGRAVITY_LS_ADDRESS.trim() &&
-      typeof env?.ANTIGRAVITY_CSRF_TOKEN === "string" && env.ANTIGRAVITY_CSRF_TOKEN.trim() &&
-      typeof env?.ANTIGRAVITY_SIDECAR_WEB_PORT === "string" && env.ANTIGRAVITY_SIDECAR_WEB_PORT.trim() &&
-      typeof env?.ANTIGRAVITY_SIDECAR_UI_TOKEN === "string" && env.ANTIGRAVITY_SIDECAR_UI_TOKEN.trim() &&
-      env?.SIDECAR_FORCE_HTTP !== "1"
-  );
-}
-
-/**
- * Resolve standalone HTTP port: prefer explicit PORT, then host-assigned
- * ANTIGRAVITY_SIDECAR_WEB_PORT (so fail-closed sidecar fallback doesn't collide on 8765),
- * and finally default to 8765.
- */
-export function resolveStandalonePort(env = process.env) {
-  for (const raw of [env?.PORT, env?.ANTIGRAVITY_SIDECAR_WEB_PORT]) {
-    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 65535) {
-      return raw === 0 ? 0 : raw;
-    }
-    if (typeof raw === "string") {
-      const trimmed = raw.trim();
-      if (/^\d+$/.test(trimmed)) {
-        const parsed = Number(trimmed);
-        if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 65535) {
-          return parsed;
-        }
-      }
-    }
-  }
-  return 8765;
-}
-
 const isDirectRun = Boolean(process.argv[1] && isSameFilePath(process.argv[1], __selfPath));
 
 function parseStrictCutoffBytes(raw) {
@@ -3006,6 +2847,12 @@ function handlePurgeMutation(data, defaultConvId = "default") {
 function handleMaintenanceMutation(data) {
   const store = getRuntimeStore();
   const action = data.action || "prune";
+  if (action === "vacuum_only") {
+    return store.maybeAutoVacuum({ force: true });
+  }
+  if (action === "auto_vacuum") {
+    return store.maybeAutoVacuum();
+  }
   const maxAgeDays = parseSafeMaxAgeDays(data.maxAgeDays, 14);
   const vacuum = action === "vacuum" || data.vacuum === true || data.vacuum === "true" || data.vacuum === "1";
   return store.pruneByTtl({ maxAgeDays, vacuum });
@@ -3047,288 +2894,22 @@ function handleStarPromptMutation(data) {
   return { ok: true, starPrompt: store.evaluateStarPrompt({ markTriggered: false }) };
 }
 
-export const AUTO_UPDATE_ROUTE = "/api/auto-update";
+const updateCoordinator = createUpdateCoordinator({
+  sidecarDirectory: __dirname,
+  getRuntimeStore,
+  getExistingRuntimeStore: () => _runtimeStore,
+  getPackageVersion,
+  invalidateVersionCache
+});
 
-let _defaultVersionChecker = null;
-let _defaultPluginUpdater = null;
-let _updateInFlight = false;
-let _updateRestartScheduled = false;
-let _autoCycleInFlight = null;
-
-const NON_CIRCUIT_AUTO_FAIL_REASONS = new Set(["gitCheckout", "notInstalled", "busy", "releaseChanged"]);
-const AUTO_UPDATE_MUTATION_ALLOWED_KEYS = new Set(["enabled", "dismissNotice"]);
-
-export function isPluginUpdateBusy() {
-  return _updateInFlight || _updateRestartScheduled;
-}
-
-function isAutoUpdateCheckEnabled() {
-  try {
-    return getEffectiveConfig().autoUpdateCheck !== false;
-  } catch {
-    return process.env.AGY_DART_DISABLE_AUTO_UPDATE_CHECK !== "1";
-  }
-}
-
-function getDefaultVersionChecker() {
-  if (!_defaultVersionChecker) {
-    _defaultVersionChecker = createVersionChecker({
-      getCurrentVersion: () => readLocalVersion() || getPackageVersion()
-    });
-  }
-  return _defaultVersionChecker;
-}
-
-function getDefaultPluginUpdater() {
-  if (!_defaultPluginUpdater) {
-    _defaultPluginUpdater = createPluginUpdater({
-      sidecarDirectory: __dirname,
-      checkVersion: getDefaultVersionChecker()
-    });
-  }
-  return _defaultPluginUpdater;
-}
-
-const VERSION_CHECK_ALLOWED_KEYS = new Set(["mode", "fresh"]);
-const PLUGIN_UPDATE_ALLOWED_KEYS = new Set(["version"]);
-
-export async function handleVersionCheck(
-  data = {},
-  checker = getDefaultVersionChecker(),
-  { autoCheckEnabled = null } = {}
-) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { ok: false, status: 400, error: "Request body must be a JSON object" };
-  }
-  for (const key of Object.keys(data)) {
-    if (!VERSION_CHECK_ALLOWED_KEYS.has(key)) {
-      return { ok: false, status: 400, error: `Unexpected field '${key}' in request body` };
-    }
-  }
-  const mode = data.mode === undefined ? "manual" : data.mode;
-  if (mode !== "manual" && mode !== "auto") {
-    return { ok: false, status: 400, error: "Invalid 'mode' value: expected 'manual' or 'auto'" };
-  }
-  if (data.fresh !== undefined && typeof data.fresh !== "boolean") {
-    return { ok: false, status: 400, error: "Field 'fresh' must be a boolean" };
-  }
-  const allowAuto = typeof autoCheckEnabled === "boolean" ? autoCheckEnabled : isAutoUpdateCheckEnabled();
-  if (mode === "auto" && !allowAuto) {
-    return {
-      ok: true,
-      status: "idle",
-      currentVersion: readLocalVersion() || getPackageVersion(),
-      disabled: true
-    };
-  }
-  return checker(mode, { fresh: Boolean(data.fresh) });
-}
-
-export async function handlePluginUpdate(
-  data = {},
-  updater = getDefaultPluginUpdater(),
-  onUpdated = null,
-  { automatic = false, store = null, nowIso = null, approvedAsset = null } = {}
-) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { ok: false, status: 400, error: "Request body must be a JSON object" };
-  }
-  for (const key of Object.keys(data)) {
-    if (!PLUGIN_UPDATE_ALLOWED_KEYS.has(key)) {
-      return { ok: false, status: 400, error: `Unexpected field '${key}' in request body` };
-    }
-  }
-  const parsed = typeof data.version === "string" ? parseVersion(data.version) : null;
-  if (!parsed) {
-    return { ok: false, status: 400, error: "Invalid or missing 'version' SemVer string" };
-  }
-  let result;
-  _updateInFlight = true;
-  try {
-    result = automatic
-      ? await updater(parsed.version, {
-          automatic: true,
-          requireVerifiedAsset: true,
-          ...(approvedAsset ? { expectedAsset: approvedAsset } : {})
-        })
-      : await updater(parsed.version);
-  } finally {
-    _updateInFlight = false;
-  }
-  if (result?.status === "updated") {
-    invalidateVersionCache();
-    try {
-      const targetStore = store || (_runtimeStore ? _runtimeStore : null);
-      if (targetStore && typeof targetStore.setAutoUpdateRuntimeState === "function") {
-        const ts = typeof nowIso === "string" && nowIso.trim() ? nowIso.trim() : new Date().toISOString();
-        if (automatic) {
-          targetStore.setAutoUpdateRuntimeState({
-            lastAutoUpdatedVersion: result.version || parsed.version,
-            lastAutoUpdatedFrom: result.previousVersion || "",
-            lastAutoUpdatedAt: ts,
-            lastAutoUpdatedUrl: result.releaseUrl || "",
-            failedVersion: "",
-            failedReason: "",
-            failedAt: ""
-          });
-        } else {
-          targetStore.setAutoUpdateRuntimeState({
-            lastAutoUpdatedVersion: "",
-            lastAutoUpdatedFrom: "",
-            lastAutoUpdatedAt: "",
-            lastAutoUpdatedUrl: "",
-            failedVersion: "",
-            failedReason: "",
-            failedAt: ""
-          });
-        }
-      }
-    } catch {}
-    if (typeof onUpdated === "function") {
-      _updateRestartScheduled = true;
-      try {
-        onUpdated(result);
-      } catch {
-        _updateRestartScheduled = false;
-      }
-    }
-  }
-  return result;
-}
-
-export function handleAutoUpdateMutation(
-  data = {},
-  { store = getRuntimeStore(), onAutoInstallEnabled = null } = {}
-) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { ok: false, status: 400, error: "Request body must be a JSON object" };
-  }
-  const keys = Object.keys(data);
-  if (keys.length === 0) {
-    return { ok: false, status: 400, error: "Expected 'enabled' or 'dismissNotice' field" };
-  }
-  for (const key of keys) {
-    if (!AUTO_UPDATE_MUTATION_ALLOWED_KEYS.has(key)) {
-      return { ok: false, status: 400, error: `Unexpected field '${key}' in request body` };
-    }
-  }
-  if (data.enabled !== undefined && typeof data.enabled !== "boolean") {
-    return { ok: false, status: 400, error: "Field 'enabled' must be a boolean" };
-  }
-  if (data.dismissNotice !== undefined && data.dismissNotice !== true) {
-    return { ok: false, status: 400, error: "Field 'dismissNotice' must be true" };
-  }
-  if (typeof data.enabled === "boolean") {
-    store.setAutoUpdateInstallEnabled(data.enabled);
-    if (data.enabled === true && typeof onAutoInstallEnabled === "function") {
-      void Promise.resolve(onAutoInstallEnabled()).catch(() => {});
-    }
-  }
-  if (data.dismissNotice === true) {
-    store.clearAutoUpdateNotice();
-  }
-  const info = store.getAutoUpdateInstallInfo();
-  const state = store.getAutoUpdateRuntimeState();
-  const localVer = readLocalVersion() || getPackageVersion();
-  const notice =
-    state.lastAutoUpdatedVersion && (!localVer || state.lastAutoUpdatedVersion === localVer)
-      ? {
-          version: state.lastAutoUpdatedVersion,
-          previousVersion: state.lastAutoUpdatedFrom || "",
-          updatedAt: state.lastAutoUpdatedAt || "",
-          releaseUrl: state.lastAutoUpdatedUrl || ""
-        }
-      : null;
-  return {
-    ok: true,
-    autoUpdateInstall: info,
-    autoUpdateNotice: notice
-  };
-}
-
-export async function runAutoUpdateCycle({
-  store = getRuntimeStore(),
-  checker = getDefaultVersionChecker(),
-  updater = getDefaultPluginUpdater(),
-  monitor = null,
-  onUpdated = null,
-  currentVersion = null,
-  nowIso = null
-} = {}) {
-  if (_autoCycleInFlight) return _autoCycleInFlight;
-
-  const task = (async () => {
-    if (!isAutoUpdateCheckEnabled()) {
-      return { ok: true, action: "skipped", reason: "checkDisabled" };
-    }
-    const release = await checker("auto");
-    if (!store.isAutoUpdateInstallEnabled()) {
-      return { ok: true, action: "checked", release, autoInstallSkipped: "installDisabled" };
-    }
-    if (isPluginUpdateBusy()) {
-      return { ok: true, action: "skipped", reason: "busy", release };
-    }
-    if (monitor?._keepaliveInFlight && monitor._keepaliveInFlight.size > 0) {
-      return { ok: true, action: "deferred", reason: "keepaliveInFlight", release };
-    }
-    const runtimeState = store.getAutoUpdateRuntimeState();
-    const curVer =
-      typeof currentVersion === "string" && currentVersion.trim()
-        ? currentVersion.trim()
-        : release?.currentVersion || readLocalVersion() || getPackageVersion();
-    const eligibility = evaluateAutoInstallEligibility({
-      release,
-      currentVersion: curVer,
-      failedVersion: runtimeState.failedVersion
-    });
-    if (!eligibility.eligible) {
-      return { ok: true, action: "checked", release, autoInstallSkipped: eligibility.skipReason };
-    }
-
-    const approvedAsset = {
-      version: eligibility.targetVersion,
-      releaseTag: typeof release.releaseTag === "string" ? release.releaseTag.trim() : "",
-      assetName: typeof release.assetName === "string" ? release.assetName.trim() : "",
-      assetUrl: typeof release.assetUrl === "string" ? release.assetUrl.trim() : "",
-      assetSha256: typeof release.assetSha256 === "string" ? release.assetSha256.trim().toLowerCase() : ""
-    };
-
-    const updRes = await handlePluginUpdate(
-      { version: eligibility.targetVersion },
-      updater,
-      onUpdated,
-      { automatic: true, store, nowIso, approvedAsset }
-    );
-    if (updRes?.status === "updated") {
-      return { ok: true, action: "updated", result: updRes };
-    }
-    const failReason = updRes?.reason || "install";
-    if (!NON_CIRCUIT_AUTO_FAIL_REASONS.has(failReason)) {
-      const ts = typeof nowIso === "string" && nowIso.trim() ? nowIso.trim() : new Date().toISOString();
-      store.setAutoUpdateRuntimeState({
-        failedVersion: eligibility.targetVersion,
-        failedReason: failReason,
-        failedAt: ts
-      });
-    }
-    return { ok: false, action: "failed", result: updRes };
-  })().finally(() => {
-    _autoCycleInFlight = null;
-  });
-
-  _autoCycleInFlight = task;
-  return task;
-}
-
-function sendJson(res, status, payload, extraHeaders = {}) {
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "no-store",
-    ...extraHeaders
-  });
-  res.end(JSON.stringify(payload));
-}
+export const {
+  isPluginUpdateBusy,
+  handleVersionCheck,
+  handlePluginUpdate,
+  handleAutoUpdateMutation,
+  runAutoUpdateCycle
+} = updateCoordinator;
+const { isAutoUpdateCheckEnabled, getDefaultVersionChecker, getDefaultPluginUpdater } = updateCoordinator;
 
 const READ_ENDPOINTS = new Set([
   "/api/stats",
@@ -3386,10 +2967,11 @@ export function createStandaloneServer({
 
       const isHtmlEntry = req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html");
       const isPreloadStub = req.method === "GET" && url.pathname === "/preload.js";
+      const isUiAsset = req.method === "GET" && Object.prototype.hasOwnProperty.call(UI_STATIC_ASSETS, url.pathname);
       if (
         !isAllowedOriginHeader(req.headers.origin, req.headers.host) ||
         !isAllowedRefererHeader(req.headers.referer, req.headers.host) ||
-        isCrossSiteFetchHeader(req.headers["sec-fetch-site"], { allowSameSite: isHtmlEntry || isPreloadStub })
+        isCrossSiteFetchHeader(req.headers["sec-fetch-site"], { allowSameSite: isHtmlEntry || isPreloadStub || isUiAsset })
       ) {
         sendJson(res, 403, { error: "Cross-origin request blocked" });
         return;
@@ -3405,12 +2987,29 @@ export function createStandaloneServer({
         return;
       }
 
+      if (isUiAsset) {
+        const asset = getStaticUiAsset(url.pathname);
+        if (!asset) {
+          res.writeHead(404, { "X-Content-Type-Options": "nosniff" });
+          res.end("Not Found");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": asset.contentType,
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "no-store"
+        });
+        res.end(asset.body);
+        return;
+      }
+
       if (isHtmlEntry) {
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "X-Content-Type-Options": "nosniff",
           "X-Frame-Options": "DENY",
-          "Content-Security-Policy": "frame-ancestors 'none'",
+          "Content-Security-Policy":
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
           "Cache-Control": "no-store"
         });
         res.end(getRenderedHtml(csrfToken));
@@ -3719,16 +3318,26 @@ if (isDirectRun) {
     const watchedBackendFiles = [
       __selfPath,
       path.resolve(__dirname, "../../plugin.json"),
+      path.resolve(__dirname, "http-helpers.mjs"),
+      path.resolve(__dirname, "http-security.mjs"),
+      path.resolve(__dirname, "update-coordinator.mjs"),
       path.resolve(__dirname, "version-check.mjs"),
       path.resolve(__dirname, "update-archive.mjs"),
       path.resolve(__dirname, "version-update.mjs"),
       path.resolve(__dirname, "../../context/lib/handoff.js"),
       path.resolve(__dirname, "../../context/lib/conversation-api.js"),
       path.resolve(__dirname, "../../context/lib/watchdog.js"),
+      path.resolve(__dirname, "../../context/lib/watchdog-notify.js"),
+      path.resolve(__dirname, "../../context/lib/watchdog-keepalive.js"),
       path.resolve(__dirname, "../../context/lib/watchdog-lease.js"),
+      path.resolve(__dirname, "../../context/lib/watchdog-lease-core.js"),
+      path.resolve(__dirname, "../../context/lib/watchdog-transcript.js"),
+      path.resolve(__dirname, "../../context/lib/watchdog-summaries.js"),
       path.resolve(__dirname, "../../context/lib/store.js"),
       path.resolve(__dirname, "../../context/lib/store/settings-maintenance.js"),
       path.resolve(__dirname, "../../context/lib/cache-analyzer.js"),
+      path.resolve(__dirname, "../../context/lib/cache/transcript-locator.js"),
+      path.resolve(__dirname, "../../context/lib/cache/usage-normalizer.js"),
       path.resolve(__dirname, "../../context/lib/config.js"),
       ...extraWatchFile
     ];
@@ -3770,9 +3379,9 @@ if (isDirectRun) {
     if (process.env.AGY_DART_DISABLE_SIDECAR_AUTORELOAD !== "1") {
       const bootMtimeSig = snapshotSidecarMtimes();
       const rawPoll = Number(process.env.AGY_DART_SIDECAR_RELOAD_POLL_MS);
-      const reloadPollMs = Number.isFinite(rawPoll) && rawPoll >= 150 ? Math.floor(rawPoll) : 3000;
+      const reloadPollMs = Number.isFinite(rawPoll) && rawPoll >= 150 ? Math.floor(rawPoll) : 10000;
       const reloadTimer = setInterval(() => {
-        if (shuttingDown || _updateInFlight || _updateRestartScheduled) return;
+        if (shuttingDown || isPluginUpdateBusy()) return;
         if (hasActiveUpdateMarker(path.join(__dirname, "../..", UPDATE_MARKER_NAME))) return;
         if (monitor._keepaliveInFlight && monitor._keepaliveInFlight.size > 0) return;
         const nextSig = snapshotSidecarMtimes();
@@ -3805,6 +3414,7 @@ if (isDirectRun) {
       }
       return html;
     });
+    registerSidecarUiAssets(app, SidecarResponse);
 
     const scheduleUpdatedRestart = () => {
       const scheduleExit = (waitedMs = 0) => {
@@ -3843,6 +3453,18 @@ if (isDirectRun) {
       void triggerBackgroundAutoUpdate();
     }, 6 * 60 * 60_000);
     periodicAutoCheckTimer.unref?.();
+
+    const runIdleAutoVacuum = () => {
+      if (shuttingDown || isPluginUpdateBusy()) return;
+      if (monitor._keepaliveInFlight && monitor._keepaliveInFlight.size > 0) return;
+      try {
+        getRuntimeStore().maybeAutoVacuum();
+      } catch {}
+    };
+    const startupVacuumTimer = setTimeout(runIdleAutoVacuum, 20_000);
+    startupVacuumTimer.unref?.();
+    const periodicVacuumTimer = setInterval(runIdleAutoVacuum, 12 * 60 * 60_000);
+    periodicVacuumTimer.unref?.();
   } else {
     const port = resolveStandalonePort(process.env);
     const server = createStandaloneServer({

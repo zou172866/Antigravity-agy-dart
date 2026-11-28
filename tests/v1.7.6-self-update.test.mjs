@@ -48,6 +48,7 @@ import {
   UPDATE_MARKER_NAME,
   UPDATE_ROUTE
 } from "../sidecars/dashboard/version-update.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -724,7 +725,7 @@ test("v1.7.6-4: /api/version & /api/update enforce POST-only, CSRF, Origin, Cont
 });
 
 test("v1.7.6-5: Dashboard UI auto-checks on open, focuses banner on topbar click, sends fresh on retry & renders EN/ZH", async () => {
-  const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars/dashboard/index.html"), "utf8");
+  const htmlSource = readDashboardHtml();
   assert.ok(htmlSource.includes('id="version-check-btn"'));
   assert.ok(htmlSource.includes('id="version-update-banner"'));
   assert.ok(htmlSource.includes('id="version-update"'));
@@ -1516,7 +1517,7 @@ test("v1.7.7-auto-install: opt-in default-OFF silent auto-update guardrails, SQL
     }
 
     // 4. Dashboard index.html exposes #auto-update-install-btn and auto-updated notice i18n
-    const html = fs.readFileSync(path.join(ROOT, "sidecars/dashboard/index.html"), "utf8");
+    const html = readDashboardHtml();
     assert.ok(html.includes('id="auto-update-install-btn"'));
     assert.ok(html.includes("toggleAutoUpdateInstall()"));
     assert.ok(html.includes("versionAutoUpdatedTitleFrom"));

@@ -79,13 +79,13 @@ Requires **Node.js 22.16+ (22.x) or Node.js 24+**. Zero third-party packages —
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.ps1 | iex
 ```
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.sh | sh
 ```
 
 ### Option 2: Let Antigravity install it
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 Send this to Antigravity:
 
 ```text
-Clone tag v1.9.4 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
+Clone tag v1.10.0 of https://github.com/zou172866/Antigravity-agy-dart.git to a temp folder, run `node scripts/install.mjs install` (add `--install-rg` on Windows if `rg` is missing), and confirm `doctor` passes.
 ```
 
 ### Option 3: Clone & install with custom flags
 
 ```powershell
-git clone --branch v1.9.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.0 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell (optional -InstallRg auto-installs ripgrep)
@@ -164,6 +164,12 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## Changelog
+
+### v1.10.0
+- **Faster hooks, LRU history cache & SQLite auto-compaction**: Split `watchdog-lease.js` into a zero-FS/zero-SQLite hot-path core (`watchdog-lease-core.js`) plus lazy `watchdog-transcript.js` and `watchdog-summaries.js` (upgraded to true O(1) LRU lookup cache); added SQLite freelist fragmentation diagnostics (`getStorageHealth`, surfaced in `ctx_doctor` & Sidecar), lossless **Compact DB** action (`vacuum_only`), threshold-gated idle auto-`VACUUM` (`>= 4 MiB` & `>= 25%` reclaimable, 24h cooldown), and raised idle Sidecar backend reload polling from 3s to 10s.
+- **Core backend modularization (100% backward-compatible)**: Decomposed `cache-analyzer.js` (`cache/transcript-locator.js`, `cache/usage-normalizer.js`), `watchdog.js` (`watchdog-notify.js`, `watchdog-keepalive.js`), and `sidecars/dashboard/server.mjs` (`http-helpers.mjs`, `http-security.mjs`, `update-coordinator.mjs`), deduplicating `getHeader` across update modules.
+- **Modular Sidecar UI, tightened CSP & UX polish**: Split the 13,479-line `sidecars/dashboard/index.html` into semantic HTML + 6 native `/ui/*` static assets (`styles.css`, `theme-init.js`, `i18n.js`, `search-state.js`, `theme-nav.js`, `app.js`) served with `nosniff`/`no-store` in both Standalone HTTP and `SidecarApp`, tightened standalone HTML CSP (`default-src 'self'; base-uri 'none'; frame-ancestors 'none'`), eliminated 1px resize layout thrashing in the section-jump `ResizeObserver`, slimmed the narrow (`<= 390px`) sticky topbar, surfaced `env`/`config.json` override badges across all core controls (Cutoff, CLI Filter, Read Dedup, Stall Guard, Global Warm) + reclaimable DB fragmentation UI, and added `pagehide`/`pageshow` lifecycle recovery.
+- **Sharper Turn-0 budget & workspace-focused cache audits**: `scripts/prefix-budget.mjs` now also measures live MCP `initialize.result.instructions` and `agents/*.md` discovery metadata (`estimatedTokensWithMetadata`); `scripts/cache-audit.mjs` now tags every finding with `scopeGroup` (`workspace` vs `global`), summarizes `findingsByScope`, and adds `--workspace-only` for zero-noise single-project audits.
 
 ### v1.9.4
 - **Full v1.9.3 audit remediation (all 23 findings resolved — 2 P1, 18 P2, 3 P3)**:

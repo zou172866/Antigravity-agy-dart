@@ -44,6 +44,7 @@ import {
   readPackageManifestFromArchive,
   selectFallbackRuntimeFiles
 } from "../sidecars/dashboard/version-update.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -650,7 +651,7 @@ function createDashboardVm(htmlSource) {
 }
 
 test("Wave2-L02: Dashboard EN/ZH dictionaries maintain exact key parity and localize region aria-labels when switched to Chinese", () => {
-  const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSource = readDashboardHtml();
   const { sandbox, getEl, ariaNodes } = createDashboardVm(htmlSource);
   const { I18N, setLang } = sandbox.__w2Inspect;
 
@@ -749,7 +750,7 @@ test("Wave2-L03: Global cutoff mutation reports config/env override provenance w
   assert.equal(lifetimeStats.savedGlobalCutoffBytes, 131072);
 
   // 5. Dashboard UI reflects override badge on lifetime scope & hides it when overridden in app scope
-  const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSource = readDashboardHtml();
   const { sandbox, getEl, setFetchHandler } = createDashboardVm(htmlSource);
   const ui = sandbox.__w2Inspect;
 

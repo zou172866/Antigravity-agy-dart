@@ -19,6 +19,7 @@ import {
 } from "../context/lib/cache-analyzer.js";
 import { ContextModeStore } from "../context/lib/store.js";
 import { evaluateCacheAlerts } from "../hooks/pre-invocation.mjs";
+import { fetchDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -722,7 +723,7 @@ test("P0-2.6: Live PreInvocation hook, Sidecar dashboard (/api/cache-diag + inde
       });
 
       // Dashboard HTML parses cleanly and exposes per-process CSRF token
-      const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+      const html = await fetchDashboardHtml(`http://127.0.0.1:${port}`);
       const token = html.match(/<meta name="agy-dart-token" content="([a-f0-9]+)">/i)?.[1];
       assert.ok(token, "Sidecar HTML must inject agy-dart-token meta");
       const authHeaders = { headers: { "X-Agy-Dart-Token": token } };

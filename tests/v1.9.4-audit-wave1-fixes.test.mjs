@@ -28,6 +28,7 @@ import { validateFetchTarget } from "../context/lib/security.js";
 import { evaluatePreToolPayload } from "../hooks/pre-tool-use.mjs";
 import { processPostToolPayload } from "../hooks/post-tool-use.mjs";
 import { apply as applyDshPlugin } from "../dsh/plugin.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -1189,7 +1190,7 @@ test("Wave1-B5 (M14): cancelled/failed read invalidates pending read cache so im
 });
 
 test("Wave1-B5 (M15): Dashboard search and inspectSource ignore stale out-of-order responses and invalidate on scope switch", async () => {
-  const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const inspectMatch = html.match(/async function inspectSource\([\s\S]*?\n    \}/);
   const searchMatch = html.match(/async function executeSearch\([\s\S]*?\n    \}/);
   assert.ok(inspectMatch && searchMatch, "Must locate inspectSource and executeSearch in index.html");
@@ -1367,7 +1368,7 @@ test("Wave1-B5 (M16+M17): diagnostics.html shrinks height from rootEl & cancels 
   assert.equal(rafQueue.size, 0);
 
   // 2. M17: Mocha and Latte placeholder text contrast meets WCAG 2.2 AA (>= 4.5:1)
-  const dashHtml = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const dashHtml = readDashboardHtml();
   const mochaBlock = dashHtml.match(/:root\[data-theme="mocha"\][\s\S]*?\n    \}/);
   assert.ok(mochaBlock, "Mocha theme block must exist");
   const mochaInputBg = mochaBlock[0].match(/--input-bg:\s*(#[0-9a-fA-F]{6})/)?.[1];

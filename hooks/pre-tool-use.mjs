@@ -29,7 +29,9 @@ let parseGitSubcommandFn = null;
 let securityModule = null;
 let textDiffModule = null;
 let cacheAnalyzerModule = null;
-let watchdogLeaseModule = null;
+let watchdogLeaseCoreModule = null;
+let watchdogSummariesModule = null;
+let watchdogTranscriptModule = null;
 
 async function ensureStoreClass() {
   if (!ContextModeStoreClass) {
@@ -71,11 +73,25 @@ async function ensureCacheAnalyzer() {
   return cacheAnalyzerModule;
 }
 
-async function ensureWatchdogLease() {
-  if (!watchdogLeaseModule) {
-    watchdogLeaseModule = await import("../context/lib/watchdog-lease.js");
+async function ensureWatchdogLeaseCore() {
+  if (!watchdogLeaseCoreModule) {
+    watchdogLeaseCoreModule = await import("../context/lib/watchdog-lease-core.js");
   }
-  return watchdogLeaseModule;
+  return watchdogLeaseCoreModule;
+}
+
+async function ensureWatchdogSummaries() {
+  if (!watchdogSummariesModule) {
+    watchdogSummariesModule = await import("../context/lib/watchdog-summaries.js");
+  }
+  return watchdogSummariesModule;
+}
+
+async function ensureWatchdogTranscript() {
+  if (!watchdogTranscriptModule) {
+    watchdogTranscriptModule = await import("../context/lib/watchdog-transcript.js");
+  }
+  return watchdogTranscriptModule;
 }
 
 if (!isDirectRun) {
@@ -2011,9 +2027,9 @@ export async function evaluatePreToolPayload(rawPayload) {
       return false;
     }
     try {
-      const wl = await ensureWatchdogLease();
+      const wlCore = await ensureWatchdogLeaseCore();
       const st = getSharedStore();
-      const existingLease = typeof wl.readWatchdogLease === "function" ? wl.readWatchdogLease(st, directConvId) : null;
+      const existingLease = typeof wlCore.readWatchdogLease === "function" ? wlCore.readWatchdogLease(st, directConvId) : null;
       if (existingLease) {
         if (
           existingLease.isSubagent === true ||
@@ -2031,15 +2047,16 @@ export async function evaluatePreToolPayload(rawPayload) {
       }
       const allowDefaultSummaryDb =
         Boolean(process.env.AGY_DART_SUMMARY_DB_PATH) || cfgSnapshot.sources.dbPath === "default";
+      const wlSummaries = await ensureWatchdogSummaries();
       const txPath =
         (typeof payload.transcriptPath === "string" && payload.transcriptPath.trim()) ||
         (typeof payload.transcript_path === "string" && payload.transcript_path.trim()) ||
         existingLease?.transcriptPath ||
-        (typeof wl.resolveCandidateTranscriptPath === "function"
-          ? wl.resolveCandidateTranscriptPath(directConvId, { allowDefaultDb: allowDefaultSummaryDb })
+        (typeof wlSummaries.resolveCandidateTranscriptPath === "function"
+          ? wlSummaries.resolveCandidateTranscriptPath(directConvId, { allowDefaultDb: allowDefaultSummaryDb })
           : "");
       if (allowDefaultSummaryDb || txPath) {
-        const summary = wl.lookupConversationSummary?.(directConvId, {
+        const summary = wlSummaries.lookupConversationSummary?.(directConvId, {
           transcriptPath: txPath,
           allowDefaultDb: allowDefaultSummaryDb,
           checkSubagent: true,
@@ -2055,9 +2072,12 @@ export async function evaluatePreToolPayload(rawPayload) {
           return false;
         }
       }
-      if (txPath && wl.detectSubagentFromTranscriptFile?.(txPath)) {
-        independentSubagentResolved = true;
-        return true;
+      if (txPath) {
+        const wlTx = await ensureWatchdogTranscript();
+        if (wlTx.detectSubagentFromTranscriptFile?.(txPath)) {
+          independentSubagentResolved = true;
+          return true;
+        }
       }
     } catch {}
     independentSubagentResolved = false;
@@ -2069,7 +2089,7 @@ export async function evaluatePreToolPayload(rawPayload) {
     try {
       const st = getSharedStore();
       if (typeof st.isWatchdogEnabled === "function" && !st.isWatchdogEnabled()) return;
-      const wl = await ensureWatchdogLease();
+      const wl = await ensureWatchdogLeaseCore();
       if (isSubagentCall && directConvId === sessionId && !subagentId && independentSubagentResolved === null) {
         await isIndependentSubagentRead();
       }

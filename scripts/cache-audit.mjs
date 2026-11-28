@@ -723,15 +723,17 @@ function listSkillFiles(skillsRoot) {
   return out;
 }
 
-function discoverPlugins(configDir, workspaceDir) {
+function discoverPlugins(configDir, workspaceDir, { workspaceOnly = false } = {}) {
   const disabledSet = new Set();
-  const cfgPath = path.join(configDir, "config.json");
-  if (isFile(cfgPath)) {
-    const parsed = safeReadJson(cfgPath);
-    if (parsed.ok && parsed.data && typeof parsed.data.plugins === "object" && parsed.data.plugins !== null) {
-      for (const [key, val] of Object.entries(parsed.data.plugins)) {
-        if (val && typeof val === "object" && val.enabled === false) {
-          disabledSet.add(key);
+  if (!workspaceOnly) {
+    const cfgPath = path.join(configDir, "config.json");
+    if (isFile(cfgPath)) {
+      const parsed = safeReadJson(cfgPath);
+      if (parsed.ok && parsed.data && typeof parsed.data.plugins === "object" && parsed.data.plugins !== null) {
+        for (const [key, val] of Object.entries(parsed.data.plugins)) {
+          if (val && typeof val === "object" && val.enabled === false) {
+            disabledSet.add(key);
+          }
         }
       }
     }
@@ -784,7 +786,9 @@ function discoverPlugins(configDir, workspaceDir) {
     }
   };
 
-  scanRoot(path.join(configDir, "plugins"), "plugin", true);
+  if (!workspaceOnly) {
+    scanRoot(path.join(configDir, "plugins"), "plugin", true);
+  }
   scanRoot(path.join(workspaceDir, ".agents", "plugins"), "workspace-plugin", false);
 
   return { activePlugins, disabledPlugins };
@@ -794,7 +798,7 @@ function discoverPlugins(configDir, workspaceDir) {
  * Check 1: Turn-0 Rules & Skill YAML Frontmatter Prefix Audit
  * ========================================================================== */
 
-function scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, seen = new Set()) {
+function scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, seen = new Set(), { workspaceOnly = false } = {}) {
   const skillItems = [];
 
   const addSkillFile = ({ skillName, path: filePath }, scope, { legacyPath = false } = {}) => {
@@ -838,8 +842,10 @@ function scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, se
   };
 
   // Global configDir skills
-  for (const s of listSkillFiles(path.join(configDir, "skills"))) {
-    addSkillFile(s, "global");
+  if (!workspaceOnly) {
+    for (const s of listSkillFiles(path.join(configDir, "skills"))) {
+      addSkillFile(s, "global");
+    }
   }
 
   // Active plugin skills (both global & workspace plugins)
@@ -892,16 +898,18 @@ function scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, se
     ".agents/skills/"
   );
 
-  const cfgBase = path.basename(configDir);
-  const isStandardConfigDir = process.platform === "win32" ? cfgBase.toLowerCase() === "config" : cfgBase === "config";
-  if (isStandardConfigDir) {
-    scanLegacySkillsRoot(
-      path.join(path.dirname(configDir), "antigravity", "skills"),
-      "global-legacy",
-      "global:antigravity/skills",
-      "antigravity/skills/",
-      "~/.gemini/config/skills/"
-    );
+  if (!workspaceOnly) {
+    const cfgBase = path.basename(configDir);
+    const isStandardConfigDir = process.platform === "win32" ? cfgBase.toLowerCase() === "config" : cfgBase === "config";
+    if (isStandardConfigDir) {
+      scanLegacySkillsRoot(
+        path.join(path.dirname(configDir), "antigravity", "skills"),
+        "global-legacy",
+        "global:antigravity/skills",
+        "antigravity/skills/",
+        "~/.gemini/config/skills/"
+      );
+    }
   }
 
   // Rank descending by Turn-0 frontmatter tokens, then bodyTokens desc, then deterministic path tie-break
@@ -1074,7 +1082,7 @@ function parseRuleFrontmatterMeta(frontmatterText) {
   return { hasTriggerKey, trigger, description };
 }
 
-function auditTurn0Prefix(configDir, workspaceDir, activePlugins, findings) {
+function auditTurn0Prefix(configDir, workspaceDir, activePlugins, findings, { workspaceOnly = false } = {}) {
   const seen = new Set();
   const ruleItems = [];
   const onDemandRules = [];
@@ -1195,20 +1203,22 @@ function auditTurn0Prefix(configDir, workspaceDir, activePlugins, findings) {
   };
 
   // Global standalone rules (~/.gemini/config/{AGENTS,GEMINI}.md and ~/.gemini/{AGENTS,GEMINI}.md)
-  for (const rootFile of ["AGENTS.md", "GEMINI.md"]) {
-    addRuleFile(path.join(configDir, rootFile), "global", configDir, { isStandalone: true });
-  }
-  const configBase = path.basename(path.resolve(configDir)).toLowerCase();
-  const configParent = path.dirname(path.resolve(configDir));
-  if (configBase === "config" && path.basename(configParent).toLowerCase() === ".gemini") {
+  if (!workspaceOnly) {
     for (const rootFile of ["AGENTS.md", "GEMINI.md"]) {
-      addRuleFile(path.join(configParent, rootFile), "global", configParent, { isStandalone: true });
+      addRuleFile(path.join(configDir, rootFile), "global", configDir, { isStandalone: true });
     }
-  }
+    const configBase = path.basename(path.resolve(configDir)).toLowerCase();
+    const configParent = path.dirname(path.resolve(configDir));
+    if (configBase === "config" && path.basename(configParent).toLowerCase() === ".gemini") {
+      for (const rootFile of ["AGENTS.md", "GEMINI.md"]) {
+        addRuleFile(path.join(configParent, rootFile), "global", configParent, { isStandalone: true });
+      }
+    }
 
-  // Global configDir rules
-  for (const f of listMarkdownFiles(path.join(configDir, "rules"))) {
-    addRuleFile(f, "global", configDir);
+    // Global configDir rules
+    for (const f of listMarkdownFiles(path.join(configDir, "rules"))) {
+      addRuleFile(f, "global", configDir);
+    }
   }
 
   // Active plugin rules (both global & workspace plugins)
@@ -1242,7 +1252,7 @@ function auditTurn0Prefix(configDir, workspaceDir, activePlugins, findings) {
   }
 
   // Scan and audit skills across global, plugin, workspace, and legacy paths
-  const skillAudit = scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, seen);
+  const skillAudit = scanAndAuditSkills(configDir, workspaceDir, activePlugins, findings, seen, { workspaceOnly });
   const items = [...ruleItems, ...skillAudit.skillItems];
 
   // Rank descending by estimated tokens (deterministic path tie-break)
@@ -1813,7 +1823,7 @@ async function runWithConcurrency(items, limit, worker) {
   return results;
 }
 
-async function auditMcpServers(configDir, workspaceDir, activePlugins, { live, timeoutMs }, findings) {
+async function auditMcpServers(configDir, workspaceDir, activePlugins, { live, timeoutMs, workspaceOnly = false }, findings) {
   const configSources = [];
   const seenConfigs = new Set();
 
@@ -1825,7 +1835,9 @@ async function auditMcpServers(configDir, workspaceDir, activePlugins, { live, t
     configSources.push({ configPath: path.resolve(configPath), scope, pluginRoot: path.resolve(pluginRoot) });
   };
 
-  addConfig(path.join(configDir, "mcp_config.json"), "global", configDir);
+  if (!workspaceOnly) {
+    addConfig(path.join(configDir, "mcp_config.json"), "global", configDir);
+  }
   for (const plugin of activePlugins) {
     addConfig(path.join(plugin.dir, "mcp_config.json"), plugin.scope, plugin.dir);
   }
@@ -3209,7 +3221,7 @@ function parseHooksConfig(data) {
   return extracted;
 }
 
-function auditHooksAndPlugins(configDir, workspaceDir, activePlugins, disabledPlugins, findings) {
+function auditHooksAndPlugins(configDir, workspaceDir, activePlugins, disabledPlugins, findings, { workspaceOnly = false } = {}) {
   // 1. Plugin conflict & duplicate install detection
   const conflicts = [];
   const activeByName = new Map();
@@ -3271,7 +3283,9 @@ function auditHooksAndPlugins(configDir, workspaceDir, activePlugins, disabledPl
     hookConfigs.push({ configPath: path.resolve(configPath), scope, baseDir: path.resolve(baseDir) });
   };
 
-  addHookConfig(path.join(configDir, "hooks.json"), "global", configDir);
+  if (!workspaceOnly) {
+    addHookConfig(path.join(configDir, "hooks.json"), "global", configDir);
+  }
   for (const plugin of activePlugins) {
     addHookConfig(path.join(plugin.dir, "hooks.json"), plugin.scope, plugin.dir);
   }
@@ -3487,14 +3501,66 @@ function formatBytesCompact(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function classifyFindingScopeGroup(finding, workspaceDir, { workspaceOnly = false } = {}) {
+  if (finding?.scopeGroup === "workspace" || finding?.scopeGroup === "global") {
+    return finding.scopeGroup;
+  }
+  const target = String(finding?.target || "");
+  if (
+    target.startsWith("workspace:") ||
+    target.startsWith("workspace/") ||
+    target.startsWith("workspace-plugin:") ||
+    target.startsWith("workspace-legacy:")
+  ) {
+    return "workspace";
+  }
+  if (
+    target.startsWith("global:") ||
+    target.startsWith("global/") ||
+    target.startsWith("global-legacy:") ||
+    target.startsWith("plugin:") ||
+    target === "safety-monitor"
+  ) {
+    return "global";
+  }
+  if (workspaceDir && target && path.isAbsolute(target)) {
+    const wsKey = normalizePathKey(workspaceDir);
+    const tKey = normalizePathKey(target);
+    if (tKey === wsKey || tKey.startsWith(wsKey + path.sep)) {
+      return "workspace";
+    }
+  }
+  return workspaceOnly ? "workspace" : "global";
+}
+
+function annotateFindingsScope(sortedFindings, workspaceDir, { workspaceOnly = false } = {}) {
+  let workspaceCount = 0;
+  let globalCount = 0;
+  const tagged = sortedFindings.map((f) => {
+    const scopeGroup = classifyFindingScopeGroup(f, workspaceDir, { workspaceOnly });
+    if (scopeGroup === "workspace") workspaceCount += 1;
+    else globalCount += 1;
+    return { ...f, scopeGroup };
+  });
+  return {
+    findings: tagged,
+    findingsByScope: {
+      workspace: workspaceCount,
+      global: globalCount
+    }
+  };
+}
+
 export function auditSkillsOnly(options = {}) {
   const workspace = path.resolve(options.workspace || process.cwd());
   const configDir = path.resolve(options.configDir || path.join(getHomeDir(), ".gemini", "config"));
+  const workspaceOnly = Boolean(options.workspaceOnly);
   const findings = [];
-  const { activePlugins } = discoverPlugins(configDir, workspace);
-  const skillAudit = scanAndAuditSkills(configDir, workspace, activePlugins, findings);
+  const { activePlugins } = discoverPlugins(configDir, workspace, { workspaceOnly });
+  const skillAudit = scanAndAuditSkills(configDir, workspace, activePlugins, findings, new Set(), { workspaceOnly });
 
-  const sortedFindings = sortFindings(findings);
+  const sortedRaw = sortFindings(findings);
+  const { findings: sortedFindings, findingsByScope } = annotateFindingsScope(sortedRaw, workspace, { workspaceOnly });
   const { score, grade, scoreBreakdown } = computeHealthScore(sortedFindings);
 
   return stableSortObject({
@@ -3503,11 +3569,13 @@ export function auditSkillsOnly(options = {}) {
     options: {
       workspace,
       configDir,
-      skillsOnly: true
+      skillsOnly: true,
+      ...(workspaceOnly ? { workspaceOnly: true } : {})
     },
     score,
     grade,
     scoreBreakdown,
+    findingsByScope,
     thresholds: {
       singleSkillFrontmatterWarnTokens: SINGLE_SKILL_FRONTMATTER_WARN_TOKENS,
       singleSkillBodyWarnTokens: SINGLE_SKILL_BODY_WARN_TOKENS,
@@ -3535,11 +3603,14 @@ export function formatSkillsAuditMarkdown(report) {
   const sb = report.scoreBreakdown;
   const s = report.summary;
   const t = report.thresholds;
+  const scopeNote = report.findingsByScope
+    ? ` (workspace: ${report.findingsByScope.workspace}, global: ${report.findingsByScope.global})`
+    : "";
   const lines = [
     "# Skills Turn-0 Tax & Progressive Disclosure Report",
     "",
     `- **Skills Health Score**: **${report.score}/100 (Grade ${report.grade})**`,
-    `- **Findings**: ${sb.criticalCount} critical, ${sb.warnCount} warn, ${sb.infoCount} info`,
+    `- **Findings**: ${sb.criticalCount} critical, ${sb.warnCount} warn, ${sb.infoCount} info${scopeNote}`,
     `- **Turn-0 Resident Frontmatter**: **~${s.totalFrontmatterTokens.toLocaleString("en-US")} tokens** across **${s.skillCount} skill(s)** (budget <= ${t.totalSkillsFrontmatterWarnTokens.toLocaleString("en-US")} tok; single skill <= ${t.singleSkillFrontmatterWarnTokens} tok)`,
     `- **On-Demand Payload (0 Turn-0 tax)**: body ~${s.totalBodyTokens.toLocaleString("en-US")} tok · progressive aux **${s.totalAuxFileCount} file(s)** (${formatBytesCompact(s.totalAuxBytes)}, ~${s.totalAuxTokens.toLocaleString("en-US")} tok, excluded from Turn 0)`,
     `- **Progressive Disclosure Adoption**: ${s.progressiveSkillCount}/${s.skillCount} skill(s) using \`references/\`, \`examples/\`, \`scripts/\`, or \`resources/\``,
@@ -3619,16 +3690,17 @@ export async function auditEnvironmentCache(options = {}) {
   const workspace = path.resolve(options.workspace || process.cwd());
   const configDir = path.resolve(options.configDir || path.join(getHomeDir(), ".gemini", "config"));
   const live = options.live !== undefined ? Boolean(options.live) : true;
+  const workspaceOnly = Boolean(options.workspaceOnly);
   const rawTimeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number.isFinite(Number(rawTimeout)) && Number(rawTimeout) > 0 ? Math.round(Number(rawTimeout)) : DEFAULT_TIMEOUT_MS;
   const includeSafety = Boolean(options.includeSafety);
 
   const findings = [];
-  const { activePlugins, disabledPlugins } = discoverPlugins(configDir, workspace);
+  const { activePlugins, disabledPlugins } = discoverPlugins(configDir, workspace, { workspaceOnly });
 
-  const prefix = auditTurn0Prefix(configDir, workspace, activePlugins, findings);
-  const mcp = await auditMcpServers(configDir, workspace, activePlugins, { live, timeoutMs }, findings);
-  const hooks = auditHooksAndPlugins(configDir, workspace, activePlugins, disabledPlugins, findings);
+  const prefix = auditTurn0Prefix(configDir, workspace, activePlugins, findings, { workspaceOnly });
+  const mcp = await auditMcpServers(configDir, workspace, activePlugins, { live, timeoutMs, workspaceOnly }, findings);
+  const hooks = auditHooksAndPlugins(configDir, workspace, activePlugins, disabledPlugins, findings, { workspaceOnly });
   let safety = null;
   if (includeSafety) {
     safety = auditSafetyMonitorOnly(options);
@@ -3656,7 +3728,8 @@ export async function auditEnvironmentCache(options = {}) {
     }
   }
 
-  const sortedFindings = sortFindings(findings);
+  const sortedRaw = sortFindings(findings);
+  const { findings: sortedFindings, findingsByScope } = annotateFindingsScope(sortedRaw, workspace, { workspaceOnly });
   const { score, grade, scoreBreakdown } = computeHealthScore(sortedFindings);
 
   const totals = {
@@ -3674,11 +3747,13 @@ export async function auditEnvironmentCache(options = {}) {
       configDir,
       live,
       timeoutMs,
+      ...(workspaceOnly ? { workspaceOnly: true } : {}),
       ...(includeSafety ? { includeSafety: true } : {})
     },
     score,
     grade,
     scoreBreakdown,
+    findingsByScope,
     totals,
     prefix,
     mcp,
@@ -3697,13 +3772,17 @@ export function formatCacheAuditMarkdown(report) {
     ? report.totals.lazyMcpCatalogTokens
     : 0;
   const lazyNote = lazyMcpTok > 0 ? `; lazy MCP catalog: ${lazyMcpTok.toLocaleString("en-US")} tok` : "";
+  const scopeCountNote = report.findingsByScope
+    ? ` (workspace: ${report.findingsByScope.workspace}, global: ${report.findingsByScope.global})`
+    : "";
+  const workspaceOnlyNote = report.options?.workspaceOnly ? " · scopeFilter=workspace-only" : "";
   const lines = [
     "# Prompt Cache Environment Audit",
     "",
     `- **Health Score**: **${report.score}/100 (Grade ${report.grade})**`,
-    `- **Findings**: ${sb.criticalCount} critical, ${sb.warnCount} warn, ${sb.infoCount} info`,
+    `- **Findings**: ${sb.criticalCount} critical, ${sb.warnCount} warn, ${sb.infoCount} info${scopeCountNote}`,
     `- **Estimated Turn-0 Prefix**: **~${report.totals.estimatedTurn0Tokens.toLocaleString("en-US")} tokens** (rules & skills frontmatter: ${report.totals.rulesAndSkillsTokens.toLocaleString("en-US")} tok + eager MCP schemas: ${eagerMcpTok.toLocaleString("en-US")} tok${lazyNote})`,
-    `- **Scope**: workspace=\`${toPosixDisplay(report.options.workspace)}\` · configDir=\`${toPosixDisplay(report.options.configDir)}\` · liveMCP=${report.options.live ? "on" : "off"}`,
+    `- **Scope**: workspace=\`${toPosixDisplay(report.options.workspace)}\` · configDir=\`${toPosixDisplay(report.options.configDir)}\` · liveMCP=${report.options.live ? "on" : "off"}${workspaceOnlyNote}`,
     ""
   ];
 
@@ -3807,6 +3886,7 @@ export function parseCliArgs(argv) {
     workspace: process.cwd(),
     configDir: path.join(getHomeDir(), ".gemini", "config"),
     live: true,
+    workspaceOnly: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     skillsOnly: false,
     safetyAudit: false,
@@ -3824,6 +3904,8 @@ export function parseCliArgs(argv) {
       opts.help = true;
     } else if (a === "--json") {
       opts.json = true;
+    } else if (a === "--workspace-only") {
+      opts.workspaceOnly = true;
     } else if (a === "--skills-only") {
       opts.skillsOnly = true;
     } else if (a === "--safety-audit") {
@@ -3879,6 +3961,7 @@ Usage:
 Options:
   --workspace <dir>         Workspace root to audit (default: current working directory)
   --config-dir <dir>        Antigravity config root (default: ~/.gemini/config)
+  --workspace-only          Audit workspace-scoped rules, skills, plugins, MCP & hooks only (skip global config)
   --skills-only             Offline fast view: audit Skills Turn-0 tax & progressive disclosure only
   --safety-audit            Offline Safety Monitor quota-burn audit (Issue #1886 Desktop & CLI logs)
   --with-safety             Include Safety Monitor audit section in the full cache audit report

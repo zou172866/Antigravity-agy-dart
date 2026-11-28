@@ -30,6 +30,7 @@ import {
 import { evaluateCacheAlerts } from "../hooks/pre-invocation.mjs";
 import { suppressSqliteExperimentalWarning } from "../hooks/compile-cache.mjs";
 import { closeRuntimeStore, registerSidecarRoutes } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 suppressSqliteExperimentalWarning();
 
@@ -630,7 +631,7 @@ test("v1.6.1-3: run_workflow & apply_edits({ verify }) & generate_image classifi
 });
 
 test("v1.6.1-4: Suppress false-idle TTL alerts during stopped_bg_pending, active child subagents, PreInvocation SYSTEM_MESSAGE wakeups & Sidecar active turns — while preserving true-idle 3/3 exhausted popup", async () => {
-  const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const htmlSrc = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-v161-ttl-"));
   const dbPath = path.join(tmpDir, "context.db");
   const cfgPath = path.join(tmpDir, "config.json");

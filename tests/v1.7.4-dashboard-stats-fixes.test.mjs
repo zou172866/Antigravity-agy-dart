@@ -15,6 +15,7 @@ import {
 } from "../context/lib/cache-analyzer.js";
 import { ContextModeStore } from "../context/lib/store.js";
 import { evaluateCacheAlerts } from "../hooks/pre-invocation.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -23,7 +24,7 @@ const T0_MS = Date.parse("2026-11-25T10:00:00.000Z");
 const iso = (sec) => new Date(T0_MS + sec * 1000).toISOString();
 
 function loadDashboardSandbox() {
-  const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   assert.ok(scriptMatches.length >= 1, "Expected inline <script> in dashboard index.html");
   for (const m of scriptMatches) {

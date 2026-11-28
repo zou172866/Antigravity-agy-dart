@@ -48,6 +48,7 @@ import {
 } from "../scripts/cache-audit.mjs";
 import { estimateTokens as prefixBudgetEstimateTokens } from "../scripts/prefix-budget.mjs";
 import { countTestCasesInSource } from "../scripts/gen-review-brief.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -1184,7 +1185,7 @@ test("Audit P1/P2/P3 (H-3, H-23, M-29, M-30, P3-1, P3-2, P3-3): Sidecar dashboar
     assert.equal(rStatsAll.json?.cutoffBytes, 32768, "P3-1: scope=all must read global cutoff");
 
     // H-23, M-30, P3-3: VM sandbox checks on sidecars/dashboard/index.html
-    const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     assert.ok(html.includes("!event.isComposing"), "P3-3: IME composition guard missing");
     assert.ok(html.includes("ch?.body"), "P3-3: null-safe ch?.body missing");
 
@@ -1523,7 +1524,7 @@ test("Audit P1/P2/P3 (H-2, H-26, M-31, M-32, M-33, P3-14, P3-15): install.mjs, c
     assert.equal(rDocOk.status, 0, `Doctor should pass on fresh install: ${rDocOk.stdout}`);
 
     const uiIndex = path.join(targetDir, "sidecars", "dashboard", "index.html");
-    const savedUi = fs.readFileSync(uiIndex, "utf8");
+    const savedUi = readDashboardHtml();
     fs.unlinkSync(uiIndex);
     const rDocMissing = spawnSync(process.execPath, [installScript, "doctor", "--target", targetDir], { encoding: "utf8", windowsHide: true });
     assert.notEqual(rDocMissing.status, 0, "M-31: doctor must fail when sidecars/dashboard/index.html is missing");

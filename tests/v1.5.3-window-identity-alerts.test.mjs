@@ -25,6 +25,7 @@ import {
   readWatchdogLease,
   recordHookLeaseTransition
 } from "../context/lib/watchdog-lease.js";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 suppressSqliteExperimentalWarning();
 
@@ -509,7 +510,7 @@ test("v1.5.3-4: PreInvocation chat banner window badge & Sidecar wd-other-alerts
     }
 
     // Verify Sidecar index.html `wd-other-alerts` renders `workspaceLabel · convTitle` + hover `title` + escapes XSS
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
     assert.ok(scriptMatch && scriptMatch[1]);
 

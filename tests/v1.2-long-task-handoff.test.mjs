@@ -27,6 +27,7 @@ import { countTestCasesInSource } from "../scripts/gen-review-brief.mjs";
 import { auditPrefixBudget } from "../scripts/prefix-budget.mjs";
 import { extractLocalSpecifiers, verifyPackageManifest } from "../scripts/verify-package-graph.mjs";
 import { createStandaloneServer, registerSidecarRoutes } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -1079,7 +1080,7 @@ test("Audit Red-Team 7: Cross-session isolation in MCP (ctx_search scope:null, s
     }
 
     // 4. Frontend DOM & out-of-order polling/scope-switch race guards in sidecars/dashboard/index.html
-    const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSource = readDashboardHtml();
     const scriptBlocks = [...htmlSource.matchAll(/<script>([\s\S]*?)<\/script>/gi)];
     assert.ok(scriptBlocks.length >= 1, "index.html must contain main inline script");
     const mainUiScript = scriptBlocks[scriptBlocks.length - 1][1];

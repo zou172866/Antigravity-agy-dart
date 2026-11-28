@@ -29,6 +29,7 @@ import {
   createStandaloneServer,
   registerSidecarRoutes
 } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -301,7 +302,7 @@ test("v1.4.1-3: Terminal states persist permanently (survive purge/prune) and Si
     }
 
     // 2. Frontend Sidecar UI VM test (index.html)
-    const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSource = readDashboardHtml();
     assert.ok(htmlSource.includes('id="github-star-link"'));
     assert.ok(htmlSource.includes(`href="${GITHUB_REPO_URL}"`));
     assert.ok(htmlSource.includes('id="star-milestone-banner"'));

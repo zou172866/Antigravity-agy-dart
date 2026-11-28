@@ -79,13 +79,13 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.ps1 | iex
+irm https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.ps1 | iex
 ```
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9.4/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.10.0/install.sh | sh
 ```
 
 ### 方法二：直接发给 Antigravity 帮你装
@@ -93,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/zou172866/Antigravity-agy-dart/v1.9
 复制下面这句发给 Antigravity 就行：
 
 ```text
-请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.9.4 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
+请将 https://github.com/zou172866/Antigravity-agy-dart.git 的 v1.10.0 标签克隆到临时目录，运行其中的 scripts/install.mjs install 完成全局安装并跑 doctor 自检（Windows 如未安装 rg 请同时传 --install-rg）。
 ```
 
 ### 方法三：克隆仓库自定义安装
 
 ```powershell
-git clone --branch v1.9.4 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
+git clone --branch v1.10.0 --depth 1 https://github.com/zou172866/Antigravity-agy-dart.git
 cd Antigravity-agy-dart
 
 # Windows PowerShell（加 -InstallRg 可顺手自动安装快速搜索工具 rg）
@@ -164,6 +164,12 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ---
 
 ## 更新日志
+
+### v1.10.0
+- **钩子更轻快、历史查询真 LRU 与本地库自动瘦身**：将 `watchdog-lease.js` 拆分为零磁盘/零 SQLite 的热路径核心（`watchdog-lease-core.js`）及按需加载的 `watchdog-transcript.js`、`watchdog-summaries.js`（升级 O(1) 真 LRU 缓存）；新增 SQLite 空洞碎片诊断（`getStorageHealth`，同步展示在 `ctx_doctor` 与右侧面板）、面板一键「**无损压缩库**」（不删记录仅回收空洞页）以及空闲自动瘦身（可回收 `>= 4 MB` 且占比 `>= 25%` 才触发，24 小时冷却）；Sidecar 后台空闲变更轮询由 3 秒放宽至 10 秒。
+- **核心后端大文件模块化拆解（100% 向后兼容）**：按职责拆分 `cache-analyzer.js`（`cache/transcript-locator.js`、`cache/usage-normalizer.js`）、`watchdog.js`（`watchdog-notify.js`、`watchdog-keepalive.js`）和 `sidecars/dashboard/server.mjs`（`http-helpers.mjs`、`http-security.mjs`、`update-coordinator.mjs`），消除跨文件重复的 `getHeader` 实现。
+- **右侧面板模块化拆分、CSP 加固与多项体验打磨**：将 1.3 万行 `sidecars/dashboard/index.html` 拆分为语义 HTML 骨架与 6 个原生 `/ui/*` 静态文件（独立 HTTP 与 SidecarApp 双模式统一托管，带 `nosniff`/`no-store`），收紧独立模式 CSP（`default-src 'self'; base-uri 'none'; frame-ancestors 'none'`）；修复拖拽侧边栏宽度时 1px 反复触发 3 次同步重排的卡顿；压缩 `<= 390px` 窄侧边栏顶栏高度；为所有核心开关（截断阈值、CLI 过滤、读去重、卡死守卫、全局续温）补齐 `env`/`config.json` 覆盖来源徽标；新增 `pagehide`/`pageshow` 页面挂起回收与恢复。
+- **开场预算与缓存体检更精准**：`scripts/prefix-budget.mjs` 新增统计 MCP 实时 `instructions` 与 `agents/*.md` 发现元数据开销（`estimatedTokensWithMetadata`）；`scripts/cache-audit.mjs` 为每条体检发现标注 `workspace` / `global` 归属并输出分组计数，新增 `--workspace-only` 参数支持单项目零干扰体检。
 
 ### v1.9.4
 - **v1.9.3 全量审计 23 项发现全部闭环修复（2 P1 / 18 P2 / 3 P3）**：

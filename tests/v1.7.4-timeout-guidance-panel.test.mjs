@@ -26,6 +26,7 @@ import { writeWatchdogLease } from "../context/lib/watchdog-lease.js";
 import { evaluateCacheAlerts } from "../hooks/pre-invocation.mjs";
 import { extractVerificationSignal } from "../hooks/post-tool-use.mjs";
 import { registerSidecarRoutes, closeRuntimeStore } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -622,7 +623,7 @@ test("v1.7.4-tp-3: High hit-rate failure/timeout suppresses delay_hot_cache and 
 });
 
 test("v1.7.4-tp-4: Dashboard single-sentence panel guidance covers all 5 states, View Error, Copy Handoff Brief, and cross-conversation isolation", async () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const clipboardRef = { text: "" };
   const handoffPayloads = {
     "conv-crit": {
@@ -925,7 +926,7 @@ function buildKvFromDiag(diag, extra = {}) {
 }
 
 test("v1.7.4-tp-6: Payment test failure is NOT cleared by passing profile test and only clears when payment test itself re-runs and passes (with panel copy check)", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const { ctx, getEl } = createDashboardVm(html, { nativeConvId: "conv-pay-1" });
   vm.runInContext("setLanguage('zh', false);", ctx);
 
@@ -996,7 +997,7 @@ test("v1.7.4-tp-6: Payment test failure is NOT cleared by passing profile test a
 });
 
 test("v1.7.4-tp-7: Truncated run_checks with summary '1 failed' and only passing block remaining shows missing-details failure copy (never pass)", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const { ctx, getEl } = createDashboardVm(html, { nativeConvId: "conv-trunc-1" });
   vm.runInContext("setLanguage('zh', false);", ctx);
 
@@ -1076,7 +1077,7 @@ test("v1.7.4-tp-7: Truncated run_checks with summary '1 failed' and only passing
 });
 
 test("v1.7.4-tp-8: Late background timeout from older code epoch goes to history only and preserves newer passing panel state", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const { ctx, getEl } = createDashboardVm(html, { nativeConvId: "conv-stale-1" });
   vm.runInContext("setLanguage('zh', false);", ctx);
 
@@ -1122,7 +1123,7 @@ test("v1.7.4-tp-8: Late background timeout from older code epoch goes to history
 });
 
 test("v1.7.4-tp-9: Pure timeout recovered strictly from saved sessionCheckpoint still renders timeout copy (never failed check copy)", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-tp-cp-timeout-"));
   const store = new ContextModeStore({ dbPath: path.join(tmpDir, "context.db"), hookMode: true });
   try {
@@ -1236,7 +1237,7 @@ test("v1.7.4-tp-9: Pure timeout recovered strictly from saved sessionCheckpoint 
 });
 
 test("v1.7.4-tp-10: Single-case / narrowed pass (-t/-k/--shard/::case/-run/--) NEVER clears broader file or suite failure", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const { ctx, getEl } = createDashboardVm(html, { nativeConvId: "conv-narrow-case-1" });
   vm.runInContext("setLanguage('zh', false);", ctx);
 
@@ -1303,7 +1304,7 @@ test("v1.7.4-tp-10: Single-case / narrowed pass (-t/-k/--shard/::case/-run/--) N
 });
 
 test("v1.7.4-tp-11: Background payment test failure is NOT ignored after editing unrelated profile file (even if profile test passes), while superseded same-check fail still goes to history", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const { ctx, getEl } = createDashboardVm(html, { nativeConvId: "conv-bg-unrelated-1" });
   vm.runInContext("setLanguage('zh', false);", ctx);
   const convId = "44444444-5555-4666-8777-888888888881";
@@ -1402,7 +1403,7 @@ test("v1.7.4-tp-11: Background payment test failure is NOT ignored after editing
 });
 
 test("v1.7.4-tp-12: Session checkpoint recovery preserves unresolved payment failure after profile/single-case pass, and unconfirmed /api/resume strips excerpts", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-tp-cp-unresolved-"));
   const dbPath = path.join(tmpDir, "context.db");
   const prevDb = process.env.AGY_DART_DB_PATH;
@@ -1511,7 +1512,7 @@ test("v1.7.4-tp-12: Session checkpoint recovery preserves unresolved payment fai
 });
 
 test("v1.7.4-tp-13: Truncated run_checks failure is NOT cleared by unrelated docs pass and persists 'previous batch failed (missing details)' until original batch re-runs", () => {
-  const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+  const html = readDashboardHtml();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-tp-trunc-batch-"));
   const store = new ContextModeStore({ dbPath: path.join(tmpDir, "context.db"), hookMode: true });
   try {
@@ -1914,7 +1915,7 @@ test("v1.7.4-tp-15: Server /api/watchdog/action interval validation & Dashboard 
     assert.equal(resetRes.ttlKeepaliveIntervalSec, 240);
 
     // 3. End-to-end Dashboard VM wired to real sidecar routes: ZH/EN option labels, preset select, custom minutes, and Global reset
-    const html = fs.readFileSync(path.join(REPO_ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     const dispatched = [];
     const { ctx, getEl } = createDashboardVm(html, {
       nativeConvId: convA,

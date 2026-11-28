@@ -18,6 +18,7 @@ import {
   createFileReadContext
 } from "../hooks/pre-tool-use.mjs";
 import { closeRuntimeStore, createStandaloneServer } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -262,6 +263,9 @@ test("v1.5.2-4: read_slices({ outlines }) extracts indented HTML (<style>/<body>
     "utf8"
   );
 
+  const inlinedHtmlPath = path.join(tmpDir, "dashboard-inlined.html");
+  fs.writeFileSync(inlinedHtmlPath, readDashboardHtml(), "utf8");
+
   try {
     const { stderr, responses } = await callFastMcp([
       {
@@ -278,7 +282,7 @@ test("v1.5.2-4: read_slices({ outlines }) extracts indented HTML (<style>/<body>
           name: "read_slices",
           arguments: {
             cwd: ROOT,
-            outlines: ["sidecars/dashboard/index.html"]
+            outlines: [inlinedHtmlPath]
           }
         }
       },
@@ -442,7 +446,7 @@ test("v1.5.2-6: Sidecar refreshData parallelizes 5 polls, skips hidden-tab inter
     assert.equal(searchResp.json.hits.length, 2);
 
     // 3. Verify frontend refreshData concurrency (inFlightPeak === 5) & hidden-tab pause
-    const htmlSource = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSource = readDashboardHtml();
     const scriptBlocks = [...htmlSource.matchAll(/<script>([\s\S]*?)<\/script>/gi)];
     const mainUiScript = scriptBlocks[scriptBlocks.length - 1][1];
 

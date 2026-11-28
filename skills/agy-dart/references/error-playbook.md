@@ -53,7 +53,7 @@ Project CLI filters live in `<workspace>/.agy-dart/filters.json` (fail-open). In
 
 - **Install `rg`**: Windows `node scripts/install.mjs install --install-rg` (`.\install.ps1 -InstallRg`); macOS/Linux `brew install ripgrep` / `apt install ripgrep`.
 - **Quoting & UTF-8**: keep inline `ctx_execute` `<=5` lines (~400 chars); for complex logs/quoting write a script under `<Artifact Directory Path>/scratch/` (or OS temp) and pass `file` + `args` (see `examples/ctx_trace_summary.py`). Unsafe shell metacharacters (`%`, `!`) fail open past `cli-filter`.
-- **Enterprise policy (`cliFilter: false`)**: if admin policy blocks `PreToolUse.overwrite` wrappers, set `"cliFilter": false` in `~/.agy-dart/config.json` (or `AGY_DART_CLI_FILTER=0`) while keeping read guards and MCP tools active.
+- **Enterprise policy (`cliFilter: false`)**: if admin policy blocks `PreToolUse.overwrite` wrappers, set `"cliFilter": false` in `~/.agy-dart/config.json` (or `AGY_DART_DISABLE_CLI_FILTER=1`) while keeping read guards and MCP tools active.
 - **Timeouts**: `run_checks` for `<=60s` foreground checks; native `run_command` (`WaitMsBeforeAsync <= 2000`, `IsDaemon: true` for servers) + `manage_task` for `>60s`/async jobs (`cliFilterAsyncBypassMs: 2000`).
 
 ## 6. `ide-tools` Duplicate `/required` Schema Error

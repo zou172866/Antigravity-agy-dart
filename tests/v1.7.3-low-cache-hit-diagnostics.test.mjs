@@ -16,6 +16,7 @@ import {
   parseTranscriptLines,
   readTranscriptTail
 } from "../context/lib/cache-analyzer.js";
+import { fetchDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -770,7 +771,7 @@ test("v1.7.3-7: Sidecar /api/cache-diag (normal, missing, legacy), EN/ZH UI rend
       });
     });
 
-    const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+    const html = await fetchDashboardHtml(`http://127.0.0.1:${port}`);
     const token = html.match(/<meta name="agy-dart-token" content="([a-f0-9]+)">/i)?.[1];
     assert.ok(token, "Sidecar HTML must inject agy-dart-token meta");
     const postJson = async (body) =>

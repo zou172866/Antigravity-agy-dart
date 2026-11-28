@@ -16,6 +16,7 @@ import {
 } from "../context/lib/watchdog-lease.js";
 import { WatchdogMonitor } from "../context/lib/watchdog.js";
 import { sendSidecarKeepaliveMessage } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -464,7 +465,7 @@ test("v1.7.6-arch-4: triggerManualKeepalive returns skippedReason='archived' and
     assert.equal(sent.length, 1);
 
     // Verify dashboard UI maps 'archived' to i18n keys
-    const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     assert.ok(html.includes("case 'archived':"), "index.html must handle skippedReason='archived'");
     assert.ok(html.includes("kvWarmSkipArchived:"), "index.html must define kvWarmSkipArchived i18n copy");
   } finally {

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -90,7 +91,7 @@ function makeEl(id, initialClasses = []) {
 }
 
 test("1. Catppuccin Mocha CSS block uses official Mocha palette, valid/used tokens, and proper responsive cascade order", () => {
-  const html = fs.readFileSync(HTML_PATH, "utf8");
+  const html = readDashboardHtml();
   const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/i);
   assert.ok(styleMatch, "Dashboard must contain an inline <style> block");
   const css = styleMatch[1];
@@ -149,7 +150,7 @@ test("1. Catppuccin Mocha CSS block uses official Mocha palette, valid/used toke
 });
 
 test("2. Theme switcher supports instant Light/Mocha flip, Auto reset (contextmenu & keyboard), i18n, and responsive jump density", () => {
-  const html = fs.readFileSync(HTML_PATH, "utf8");
+  const html = readDashboardHtml();
   const scriptMatches = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];
   const mainScript = scriptMatches.map((m) => m[1]).find((s) => s.includes("function cycleThemeMode"));
   assert.ok(mainScript, "Dashboard main script must define cycleThemeMode");
@@ -362,7 +363,7 @@ test("2. Theme switcher supports instant Light/Mocha flip, Auto reset (contextme
 });
 
 test("3. Anti-FOUC head script and scroll-spy nearBottom guards prevent white flash and false bottom highlight", () => {
-  const html = fs.readFileSync(HTML_PATH, "utf8");
+  const html = readDashboardHtml();
   const headInitMatch = html.match(/<script\s+data-theme-init>([\s\S]*?)<\/script>/i);
   assert.ok(headInitMatch, "Anti-FOUC <script data-theme-init> must exist");
 

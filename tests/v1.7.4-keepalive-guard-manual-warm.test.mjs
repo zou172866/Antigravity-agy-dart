@@ -44,6 +44,7 @@ import {
   registerSidecarRoutes,
   stopWatchdogMonitor
 } from "../sidecars/dashboard/server.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -1500,7 +1501,7 @@ test("v1.7.4-7: Sidecar Standalone HTTP & SidecarApp API parity, auth/400/struct
 
     // 7c. Dashboard VM DOM tests: ZH/EN, 2A narrow-margin clickable, actual auto-skip badge, 1h expiry tier,
     //     double-click sends once, wait timeout re-fetches, session switch discards stale response, XSS-safe error
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
     assert.ok(scriptMatch && scriptMatch[1]);
 
@@ -2050,7 +2051,7 @@ test("v1.7.4-9 (P1-2): Standalone dashboard with inferred ID hides/blocks manual
     assert.equal(sent.length, 0, "Unconfirmed manualTtlKeepalive must NEVER invoke sender");
 
     // 9b. Standalone Dashboard VM (NO window.sidecar) with inferred fallback ID before user selects a session
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
     assert.ok(scriptMatch && scriptMatch[1]);
 
@@ -2511,7 +2512,7 @@ test("v1.7.4-11 (P2-4): Legacy lease without explicit cacheOriginTs straddling e
     assert.equal(kvPayload.ttlKeepalive.remainingSec, 100);
 
     // Verify BOTH dashboard refresh paths (renderKvCacheCard/syncKvTtlState AND renderWatchdogCard) agree with backend (100s left, button enabled)
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const htmlSrc = readDashboardHtml();
     const scriptMatch = htmlSrc.match(/<script>([\s\S]*?)<\/script>/);
     const elements = new Map();
     const makeEl = (id) => ({

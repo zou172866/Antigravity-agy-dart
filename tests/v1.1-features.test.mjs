@@ -23,6 +23,7 @@ import {
 import { cleanStringArg } from "../hooks/pre-tool-use.mjs";
 import { extractInvalidationTargets } from "../hooks/post-tool-use.mjs";
 import { assemblePrefixStableStartup } from "../hooks/session-start.mjs";
+import { readDashboardHtml } from "./helpers/dashboard-html.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -1001,7 +1002,7 @@ test("Hardening regressions: Store lifetime toggles, pruneByTtl empty string saf
     assert.equal(editDiag.duplicateReadCount, 1, "Read after apply_edits is fresh (0 dup), then cross-slash view_file is 1 dup");
 
     // 7. Sidecar dashboard inline <script> parses cleanly as valid JS and escapes HTML
-    const html = fs.readFileSync(path.join(ROOT, "sidecars", "dashboard", "index.html"), "utf8");
+    const html = readDashboardHtml();
     const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
     assert.ok(scriptMatches.length >= 1);
     for (const m of scriptMatches) {
