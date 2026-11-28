@@ -64,7 +64,7 @@ Antigravity can occasionally re-review long chats in the background and quietly 
 6. **Secret masking & sensitive-file protection**: Masks API keys and tokens in logs or web pages, blocks accidental reads of `.env` files when configured, and stops untrusted Git configs from running external commands.
 7. **Keep tool replies under 8.8 KB**: Antigravity spills tool replies above ~10 KB into a temp file that costs an extra read turn; the plugin stays inside 8.8 KB and shifts leftover space from short passing checks to real error stack traces.
 8. **Usage breakdown, inline diagnostic cards & one-click updates**: Inspect how much context goes to file reads, terminal output, or subagents, view 15-turn cache trends, see interactive inline cards when running `ctx_stats` / `ctx_doctor` (with one-click jump pills to open the side panel on Antigravity `v2.35.1+`), update right from the panel top bar, or replay past chats via CLI to estimate cache hits and warming cost.
-9. **Plays nicely with your Skills + Skills & Quota Audits**: Your Skills handle workflows while `agy-dart` quietly guards file reads, trims logs, and watches cache underneath; run `node bin/agy-dart.mjs audit skills` to inspect Skill startup tax or `node bin/agy-dart.mjs audit quota` (with `--mark <pct>`) to separate 1× work, `#1890` 4× custom-agent calls, and `#1886` background reviews.
+9. **Plays nicely with your Skills + Skills & Quota Audits**: Your Skills handle workflows while `agy-dart` quietly guards file reads, trims logs, and watches cache underneath; run `node bin/agy-dart.mjs audit skills` to inspect Skill startup tax or `node bin/agy-dart.mjs audit quota` (with `--mark-gemini <pct>` / `--mark-claude-gpt <pct>` and `--calibrate-baseline`) to separate 1× work by model pool, `#1890` 4× custom-agent calls, and `#1886` background reviews.
 
 > Antigravity updates frequently — click **Star** at the top right to follow compatibility updates.
 
@@ -166,6 +166,7 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ## Changelog
 
 ### v1.10.3
+- **Quota attribution & `#1890` 4× sentinel CLI (`node bin/agy-dart.mjs audit quota` / `npm run quota:audit`, devtools-only, 0 Turn-0 overhead)**: Unifies three attribution layers offline—(1) `#1890` custom-agent 4× invocation & transitive descendant lineage audit against the official 1× built-in allowlist (including `/boost` workers) + on-disk `agents/*.md` scan; (2) `#1886` background safety-monitor attribution; (3) multi-session 1× equivalent USD billing split by Antigravity weekly quota pool (`gemini` vs `claude-gpt`, with `CHECKPOINT` model inheritance), dual-pool checkpoints (`--mark-gemini` / `--mark-claude-gpt`), and persistent per-pool personal 1× baselines (`--calibrate-baseline` / `--set-baseline-gemini` / `--set-baseline-claude-gpt`) so different tiers and pools neither false-alarm nor miss real 4× jumps.
 - **Sidecar host-liveness auto-exit (`#1663`)**: Added shared byte-identical `sidecars/dashboard/host-liveness.mjs` (dual PPID + exclusive loopback bind probe, grace window, alive-observation gate, `AGY_DART_DISABLE_LIVENESS_GUARD=1` kill-switch) and upgraded `shutdownCleanly` to wait up to 15s (500ms polling) for in-flight updates or keepalives before closing cleanly.
 
 ### v1.10.2

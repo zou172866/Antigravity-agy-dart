@@ -5,7 +5,7 @@
 <!-- AUTO:INTRO:END -->
 
 <!-- AUTO:META:START -->
-> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.3` · 核心追踪文件 72 个（合计 90,531 行） · 测试套件 62 个 / 422 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
+> **同步快照（由 `scripts/gen-review-brief.mjs` 自动维护）**：版本 `v1.10.3` · 核心追踪文件 72 个（合计 90,783 行） · 测试套件 62 个 / 423 个用例 · 可运行 `node scripts/gen-review-brief.mjs --check` 检验零漂移。
 <!-- AUTO:META:END -->
 
 ---
@@ -163,7 +163,7 @@ flowchart TB
 | `dsh/plugin.mjs` | 141 | DSH 原生工具桥接插件：透明挂接 pre/execute/result 钩子，失败/取消读自动失效待定缓存并保持 fail-open |
 | `bin/agy-dart.mjs` | 59 | 统一 CLI 入口（devtools）：派发 install/doctor/benchmark/cache-audit/prefix-budget/outline |
 | `scripts/cache-audit.mjs` | 4,281 | 全域环境 Prompt Cache 体检 `npm run cache:audit`（devtools）：规则/技能 CJK 估 token、双次握手探测 MCP 确定性、静态分析中段 Hook、`workspace`/`global` 归属统计、`--workspace-only` 单仓过滤与 `#1890` 自定义 Agent 体检 |
-| `scripts/quota-audit.mjs` | 1,618 | 轻量 CLI 扣额归因与 `#1890` 4× 自定义 Agent 哨兵 `npm run quota:audit`（devtools）：全机多会话 1× 等效账单、自定义 Agent 及其后代谱系越界检测、复用 `#1886` 后台安检归因及 `--mark <剩余%>` 真实倍率校准 |
+| `scripts/quota-audit.mjs` | 1,870 | 轻量 CLI 扣额归因与 `#1890` 4× 自定义 Agent 哨兵 `npm run quota:audit`（devtools）：全机多会话按模型池（`gemini`/`claude-gpt`）1× 等效账单与 `CHECKPOINT` 模型继承、自定义 Agent 及其后代谱系越界检测、复用 `#1886` 后台安检归因、双池打点及分池持久化个人 1× 基线定标 |
 | `scripts/install.mjs` | 1,558 | 跨平台安装/卸载/模式切换/`doctor` 健康自检：消费 `scripts/package-manifest.json` 导出 `RUNTIME_FILES`（默认）与 `DEVTOOLS_FILES`（`--with-devtools`），校验 5 大 Hook 与 Watchdog 并输出生效配置 |
 | `scripts/targets/index.mjs` | 281 | 多宿主安装/卸载/`doctor` 路由器与并发安全安装互斥锁（token + 新建宽限窗口 + `.reclaim` 失效锁回收） |
 | `scripts/targets/shared.mjs` | 300 | 多宿主共享运行时同步、托管文件哈希、退役清理与安装收据管理 |
@@ -263,7 +263,7 @@ WAL 模式 + `busy_timeout = 5000` + `synchronous = NORMAL` + `_withBusyRetry` �
 ```bash
 # 1. 全量 62 个测试套件（覆盖全部生命周期钩子、双 MCP、缓存诊断、看门狗、多宿主安装/自更新、性能优化与安全回归）
 npm test
-# 预期基线：422/422 PASS, 0 fail
+# 预期基线：423/423 PASS, 0 fail
 
 # 2. 静态 Import 图打包完整性与 runtime/devtools 隔离校验
 npm run verify:pkg

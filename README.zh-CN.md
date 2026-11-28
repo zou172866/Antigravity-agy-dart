@@ -64,7 +64,7 @@ Antigravity 偶尔会在后台反复重审长对话，悄悄把 5 小时额度�
 6. **密钥打码与敏感文件防护**：日志和网页里的 API Key、口令自动打码；可挡住 AI 误读 `.env` 等敏感文件，并防止陌生仓库的 Git 配置偷偷执行外部命令。
 7. **把单次返回压在 8.8 KB 内**：Antigravity 单次工具返回超过约 10 KB 会转存临时文件、害 AI 多跑一轮去读；插件把返回稳在 8.8 KB 内，还会把简短命令省下的字数匀给真正报错的长堆栈。
 8. **面板看账本、聊天内联卡片与一键更新**：右侧面板可看上下文都花在读文件、终端还是子助手上，查看最近 15 轮缓存命中走势，调 `ctx_stats` / `ctx_doctor` 还能直接在聊天里看交互式诊断卡片（Antigravity `v2.35.1+` 支持一键点进右侧面板）；顶栏支持一键检查/自动更新，命令行还能拿历史记录测算缓存和续温成本。
-9. **和各类 Skill 放心叠加，还能做体检与扣额归因**：你装的各类 Skill 照常管流程，插件在底层负责防盲读、压日志和保缓存，互不打架；跑 `node bin/agy-dart.mjs audit skills` 查各 Skill 开场占用，或跑 `node bin/agy-dart.mjs audit quota`（配合 `--mark <剩余%>`）一键拆清 1× 正常消耗、`#1890` 自定义 Agent 4× 越界与 `#1886` 后台安全审查。
+9. **和各类 Skill 放心叠加，还能做体检与扣额归因**：你装的各类 Skill 照常管流程，插件在底层负责防盲读、压日志和保缓存，互不打架；跑 `node bin/agy-dart.mjs audit skills` 查各 Skill 开场占用，或跑 `node bin/agy-dart.mjs audit quota`（配合 `--mark-gemini` / `--mark-claude-gpt` 与 `--calibrate-baseline`）按模型池拆清 1× 正常消耗、`#1890` 自定义 Agent 4× 越界与 `#1886` 后台安全审查。
 
 > Antigravity 官方更新很勤，点一下右上角 **Star** 方便随时跟进兼容更新。
 
@@ -166,6 +166,7 @@ node ~/.gemini/config/plugins/agy-dart/scripts/install.mjs tool-loading lazy
 ## 更新日志
 
 ### v1.10.3
+- **轻量 CLI 扣额归因与 `#1890` 4× 哨兵（`node bin/agy-dart.mjs audit quota` / `npm run quota:audit`，仅 devtools，零 Turn-0 开销）**：离线同窗拆清三本账——（1）`#1890` 自定义 Agent 4× 调用及传递后代谱系越界检测（对齐官方 1× 内置与 `/boost` Worker 白名单 + 磁盘 `agents/*.md` 扫描）；（2）复用 `#1886` 后台安全审查归因；（3）全机多会话 1× 等效美元按 Antigravity 周额度池分桶（`gemini` vs `claude-gpt`，含 `CHECKPOINT` 模型继承）、双池打点（`--mark-gemini` / `--mark-claude-gpt`）及分池持久化个人 1× 基线定标（`--calibrate-baseline` / `--set-baseline-gemini` / `--set-baseline-claude-gpt`），消除跨档位/跨池硬编码 `$6/1%` 误报与漏报。
 - **Sidecar 宿主失联自退守卫（`#1663`）**：新增与 `agy-cmd` 逐字节一致的 `sidecars/dashboard/host-liveness.mjs`（PPID + 回环独占 bind 双信号、启动宽限期、首次存活门禁、支持 `AGY_DART_DISABLE_LIVENESS_GUARD=1` 禁用），升级 `shutdownCleanly` 在退出前每 500ms 轮询等待进行中的自更新或保活（最多 15s）后优雅关闭。
 
 ### v1.10.2

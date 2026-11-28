@@ -800,10 +800,38 @@ export function scanQuotaTranscripts({
  * Weekly Quota Checkpoint Store & Multiplier Calibration
  * ========================================================================== */
 
+function normalizeBaselinesMap(rawBaselines) {
+  const out = {};
+  if (!rawBaselines || typeof rawBaselines !== "object" || Array.isArray(rawBaselines)) return out;
+  for (const [k, v] of Object.entries(rawBaselines)) {
+    let pool;
+    try {
+      pool = normalizeQuotaPool(k, { allowAll: true });
+    } catch {
+      continue;
+    }
+    const rawNum = typeof v === "number" ? v : v && typeof v === "object" ? Number(v.usdPerPct) : NaN;
+    if (!Number.isFinite(rawNum) || rawNum <= 0) continue;
+    out[pool] = {
+      usdPerPct: roundNum(rawNum, 4),
+      updatedAt:
+        v && typeof v === "object" && typeof v.updatedAt === "string" && v.updatedAt
+          ? v.updatedAt
+          : null,
+      source:
+        v && typeof v === "object" && typeof v.source === "string" && v.source
+          ? v.source
+          : "saved"
+    };
+  }
+  return out;
+}
+
 export function loadQuotaMarks(statePath = getDefaultQuotaMarksPath()) {
   try {
-    if (!fs.existsSync(statePath)) return { schemaVersion: 1, marks: [] };
+    if (!fs.existsSync(statePath)) return { schemaVersion: 1, baselines: {}, marks: [] };
     const raw = JSON.parse(fs.readFileSync(statePath, "utf8").replace(/^\uFEFF/, ""));
+    const baselines = normalizeBaselinesMap(raw?.baselines);
     const marks = Array.isArray(raw?.marks)
       ? raw.marks
           .filter(
@@ -833,9 +861,9 @@ export function loadQuotaMarks(statePath = getDefaultQuotaMarksPath()) {
           })
           .sort((a, b) => (a.tsMs !== b.tsMs ? a.tsMs - b.tsMs : compareAscii(a.pool, b.pool)))
       : [];
-    return { schemaVersion: 1, marks };
+    return { schemaVersion: 1, baselines, marks };
   } catch {
-    return { schemaVersion: 1, marks: [] };
+    return { schemaVersion: 1, baselines: {}, marks: [] };
   }
 }
 
@@ -859,7 +887,17 @@ function saveQuotaMarksAtomic(statePath, data) {
   const dir = path.dirname(statePath);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = `${statePath}.tmp.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
-  const payload = JSON.stringify({ schemaVersion: 1, marks: trimMarksPerPool(data.marks) }, null, 2) + "\n";
+  const baselines = normalizeBaselinesMap(data.baselines);
+  const payload =
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        ...(Object.keys(baselines).length > 0 ? { baselines } : {}),
+        marks: trimMarksPerPool(data.marks || [])
+      },
+      null,
+      2
+    ) + "\n";
   fs.writeFileSync(tmp, payload, "utf8");
   try {
     fs.renameSync(tmp, statePath);
@@ -869,6 +907,40 @@ function saveQuotaMarksAtomic(statePath, data) {
     } catch {}
     throw err;
   }
+}
+
+export function setQuotaBaseline(
+  pool,
+  usdPerPct,
+  { statePath = getDefaultQuotaMarksPath(), source = "manual", nowMs = Date.now() } = {}
+) {
+  const normPool = normalizeQuotaPool(pool, { allowAll: true });
+  const val = Number(usdPerPct);
+  if (!Number.isFinite(val) || val <= 0) {
+    throw new Error(`Invalid baseline USD/1% '${usdPerPct}' for pool '${normPool}'. Expected a positive number.`);
+  }
+  const tsMs = Math.round(Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now());
+  const store = loadQuotaMarks(statePath);
+  const entry = {
+    usdPerPct: roundNum(val, 4),
+    updatedAt: new Date(tsMs).toISOString(),
+    source: String(source || "manual").trim() || "manual"
+  };
+  store.baselines[normPool] = entry;
+  saveQuotaMarksAtomic(statePath, store);
+  return { pool: normPool, baseline: entry, baselines: store.baselines, statePath };
+}
+
+export function clearQuotaBaseline(statePath = getDefaultQuotaMarksPath(), { pool = "all" } = {}) {
+  const normPool = normalizeQuotaPool(pool, { allowAll: true });
+  const store = loadQuotaMarks(statePath);
+  if (normPool === "all") {
+    store.baselines = {};
+  } else {
+    delete store.baselines[normPool];
+  }
+  saveQuotaMarksAtomic(statePath, store);
+  return { statePath, cleared: true, pool: normPool, baselines: store.baselines };
 }
 
 export function recordQuotaMark(
@@ -893,26 +965,34 @@ export function recordQuotaMark(
   store.marks.push(mark);
   store.marks = trimMarksPerPool(store.marks);
   saveQuotaMarksAtomic(statePath, store);
-  return { mark, marks: store.marks, statePath };
+  return { mark, marks: store.marks, baselines: store.baselines, statePath };
 }
 
-export function resetQuotaMarks(statePath = getDefaultQuotaMarksPath(), { pool = "all" } = {}) {
+export function resetQuotaMarks(
+  statePath = getDefaultQuotaMarksPath(),
+  { pool = "all", clearBaselines = false } = {}
+) {
   const normPool = normalizeQuotaPool(pool, { allowAll: true });
-  if (normPool === "all") {
-    saveQuotaMarksAtomic(statePath, { schemaVersion: 1, marks: [] });
-    return { statePath, cleared: true, pool: "all" };
-  }
   const store = loadQuotaMarks(statePath);
+  if (normPool === "all") {
+    store.marks = [];
+    if (clearBaselines) store.baselines = {};
+    saveQuotaMarksAtomic(statePath, store);
+    return { statePath, cleared: true, pool: "all", baselinesCleared: Boolean(clearBaselines) };
+  }
   store.marks = store.marks.filter((m) => (m.pool || "all") !== normPool);
+  if (clearBaselines) delete store.baselines[normPool];
   saveQuotaMarksAtomic(statePath, store);
-  return { statePath, cleared: true, pool: normPool };
+  return { statePath, cleared: true, pool: normPool, baselinesCleared: Boolean(clearBaselines) };
 }
 
 export function evaluateQuotaCalibration(
   marks,
   {
     pool = "all",
-    baselineUsdPerPct = DEFAULT_BASELINE_USD_PER_PCT,
+    baselineUsdPerPct = null,
+    baselineSource = null,
+    savedBaselines = null,
     brainRoots = null,
     safety = null,
     diskCustomAgents = null
@@ -928,6 +1008,24 @@ export function evaluateQuotaCalibration(
         ? "--mark-claude-gpt <剩余%>"
         : "--mark <当前周额度%>";
 
+  let effectiveBaseline = null;
+  let effectiveBaselineSource = "uncalibrated";
+  const explicitBaseline = Number(baselineUsdPerPct);
+  const savedEntry = savedBaselines && typeof savedBaselines === "object" ? savedBaselines[targetPool] : null;
+  const savedBaselineVal =
+    typeof savedEntry === "number" ? savedEntry : savedEntry && typeof savedEntry === "object" ? Number(savedEntry.usdPerPct) : NaN;
+
+  if (baselineUsdPerPct !== null && baselineUsdPerPct !== undefined && Number.isFinite(explicitBaseline) && explicitBaseline > 0) {
+    effectiveBaseline = roundNum(explicitBaseline, 4);
+    effectiveBaselineSource = baselineSource || "cli";
+  } else if (Number.isFinite(savedBaselineVal) && savedBaselineVal > 0) {
+    effectiveBaseline = roundNum(savedBaselineVal, 4);
+    effectiveBaselineSource = "saved";
+  } else if (targetPool === "all") {
+    effectiveBaseline = DEFAULT_BASELINE_USD_PER_PCT;
+    effectiveBaselineSource = "default";
+  }
+
   const validMarks = Array.isArray(marks)
     ? marks.filter((m) => (m.pool || "all") === targetPool).sort((a, b) => a.tsMs - b.tsMs)
     : [];
@@ -937,7 +1035,8 @@ export function evaluateQuotaCalibration(
       poolLabel,
       status: "needs_two_marks",
       markCount: validMarks.length,
-      baselineUsdPerPct,
+      baselineUsdPerPct: effectiveBaseline,
+      baselineSource: effectiveBaselineSource,
       latestMark: validMarks[validMarks.length - 1] || null,
       verdictZh:
         validMarks.length === 0
@@ -956,7 +1055,8 @@ export function evaluateQuotaCalibration(
       poolLabel,
       status: "quota_reset_detected",
       markCount: validMarks.length,
-      baselineUsdPerPct,
+      baselineUsdPerPct: effectiveBaseline,
+      baselineSource: effectiveBaselineSource,
       fromMark: prevLatest,
       toMark: latest,
       deltaPct: roundNum(prevLatest.remainingPct - latest.remainingPct, 4),
@@ -979,7 +1079,8 @@ export function evaluateQuotaCalibration(
       poolLabel,
       status: "no_quota_drop_yet",
       markCount: validMarks.length,
-      baselineUsdPerPct,
+      baselineUsdPerPct: effectiveBaseline,
+      baselineSource: effectiveBaselineSource,
       fromMark: prevLatest,
       toMark: latest,
       deltaPct: 0,
@@ -996,7 +1097,8 @@ export function evaluateQuotaCalibration(
   });
   const deltaUsd1x = windowScan.totalUsd1x;
   const usdPerPct = deltaPct > 0 ? roundNum(deltaUsd1x / deltaPct, 4) : 0;
-  const impliedMultiplier = usdPerPct > 0 ? roundNum(baselineUsdPerPct / usdPerPct, 2) : null;
+  const impliedMultiplier =
+    effectiveBaseline !== null && usdPerPct > 0 ? roundNum(effectiveBaseline / usdPerPct, 2) : null;
 
   const customCalls =
     targetPool === "all"
@@ -1012,26 +1114,35 @@ export function evaluateQuotaCalibration(
   if (deltaUsd1x <= 0.001) {
     status = "insufficient_activity";
     verdictZh = `${poolPrefix}锚点窗口内仅测得 $${deltaUsd1x} 本地对话消耗但周额度下降了 ${deltaPct}%（可能是其他设备/客户端消耗，或尚未落盘）。`;
+  } else if (effectiveBaseline === null) {
+    if (customCalls > 0) {
+      status = "alert_suspected_4x";
+      verdictZh = `${poolPrefix}告警（区间每 1% 对应 $${usdPerPct.toFixed(2)}，尚未标定个人 1× 基线）：窗口内直接命中 ${customCalls} 次自定义 Agent 4× 调用，请按下方清单排查对应会话。`;
+    } else {
+      status = "baseline_uncalibrated";
+      const setFlag = targetPool === "gemini" ? "--set-baseline-gemini" : "--set-baseline-claude-gpt";
+      verdictZh = `${poolPrefix}实测每 1% 对应 $${usdPerPct.toFixed(2)}（消耗 $${deltaUsd1x.toFixed(3)} / 下降 ${deltaPct}%，窗口内 0 次自定义 Agent 调用），尚未标定该池个人 1× 基线（不同订阅档位与池体量差异大，不盲套全局 $6/1%）。确认本区间正常后可运行 \`--calibrate-baseline\` 或 \`${setFlag} ${usdPerPct.toFixed(2)}\` 锁定为你的 1× 基准线。`;
+    }
   } else if (impliedMultiplier !== null && impliedMultiplier <= 1.35 && customCalls === 0) {
     status = "pass_1x";
-    verdictZh = `${poolPrefix}实测通过（≈ ${impliedMultiplier}×，每 1% 对应 $${usdPerPct.toFixed(2)}，基线 $${baselineUsdPerPct.toFixed(2)}）：防 4× 改造已生效，无隐性 4× 扣费。`;
+    verdictZh = `${poolPrefix}实测通过（≈ ${impliedMultiplier}×，每 1% 对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：防 4× 改造已生效，无隐性 4× 扣费。`;
   } else if (impliedMultiplier !== null && impliedMultiplier <= 2.5) {
     status = "warn_elevated";
     const hints = [];
     if (customCalls > 0) hints.push(`窗口内存在 ${customCalls} 次自定义 Agent 相关越界记录`);
     if (heavyReviews > 0) hints.push(`伴随 ${heavyReviews} 次 #1886 后台重型安全审查`);
     if (hints.length === 0) hints.push("可能是模型基线差异或短窗取整误差（建议跨 ≥2% 下降再复核）");
-    verdictZh = `${poolPrefix}实测扣额偏高（≈ ${impliedMultiplier}×，每 1% 对应 $${usdPerPct.toFixed(2)}）：${hints.join("；")}。`;
+    verdictZh = `${poolPrefix}实测扣额偏高（≈ ${impliedMultiplier}×，每 1% 对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：${hints.join("；")}。`;
   } else {
     status = "alert_suspected_4x";
     if (customCalls > 0) {
-      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}）：窗口内命中 ${customCalls} 次自定义 Agent 4× 调用，请按下方清单排查对应会话。`;
+      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：窗口内命中 ${customCalls} 次自定义 Agent 4× 调用，请按下方清单排查对应会话。`;
     } else if (heavyReviews >= 3) {
-      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}）：未见自定义 Agent 调用，但伴随 ${heavyReviews} 次 #1886 后台重型安全审查，建议切换新窗口止损。`;
+      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：未见自定义 Agent 调用，但伴随 ${heavyReviews} 次 #1886 后台重型安全审查，建议切换新窗口止损。`;
     } else if (placeholderCount > 0) {
-      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}）：未见自定义 Agent 调用且后台审查极少，高度疑似磁盘留存的 ${placeholderCount} 个 DEPRECATED 占位文件引发连坐，建议删除占位后复测。`;
+      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：未见自定义 Agent 调用且后台审查极少，高度疑似磁盘留存的 ${placeholderCount} 个 DEPRECATED 占位文件引发连坐，建议删除占位后复测。`;
     } else {
-      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}）：请核查是否有外部 CLI --agent 会话或其他设备共享同一账号额度。`;
+      verdictZh = `${poolPrefix}告警（实测 ≈ ${impliedMultiplier}×，每 1% 仅对应 $${usdPerPct.toFixed(2)}，基线 $${effectiveBaseline.toFixed(2)}）：请核查是否有外部 CLI --agent 会话或其他设备共享同一账号额度。`;
     }
   }
 
@@ -1040,7 +1151,8 @@ export function evaluateQuotaCalibration(
     poolLabel,
     status,
     markCount: validMarks.length,
-    baselineUsdPerPct,
+    baselineUsdPerPct: effectiveBaseline,
+    baselineSource: effectiveBaselineSource,
     fromMark,
     toMark: latest,
     durationMinutes: roundNum((latest.tsMs - fromMark.tsMs) / 60000, 1),
@@ -1054,9 +1166,10 @@ export function evaluateQuotaCalibration(
 }
 
 function calibrationSeverityRank(status) {
-  if (status === "alert_suspected_4x") return 4;
-  if (status === "warn_elevated") return 3;
-  if (status === "insufficient_activity") return 2;
+  if (status === "alert_suspected_4x") return 5;
+  if (status === "warn_elevated") return 4;
+  if (status === "insufficient_activity") return 3;
+  if (status === "baseline_uncalibrated") return 2;
   if (status === "pass_1x") return 1;
   return 0;
 }
@@ -1065,25 +1178,61 @@ export function auditQuota(options = {}) {
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Math.round(Number(options.nowMs)) : Date.now();
   const hours = Number.isFinite(Number(options.hours)) && Number(options.hours) > 0 ? Number(options.hours) : DEFAULT_HOURS;
   const activePool = normalizeQuotaPool(options.pool || "all", { allowAll: true });
-  const baselineUsdPerPct =
-    Number.isFinite(Number(options.baselineUsdPerPct)) && Number(options.baselineUsdPerPct) > 0
+  const explicitGlobalBaseline =
+    options.baselineUsdPerPct !== undefined &&
+    options.baselineUsdPerPct !== null &&
+    Number.isFinite(Number(options.baselineUsdPerPct)) &&
+    Number(options.baselineUsdPerPct) > 0
       ? Number(options.baselineUsdPerPct)
-      : DEFAULT_BASELINE_USD_PER_PCT;
-  const baselineGeminiUsdPerPct =
-    Number.isFinite(Number(options.baselineGeminiUsdPerPct)) && Number(options.baselineGeminiUsdPerPct) > 0
+      : null;
+  const explicitGeminiBaseline =
+    options.baselineGeminiUsdPerPct !== undefined &&
+    options.baselineGeminiUsdPerPct !== null &&
+    Number.isFinite(Number(options.baselineGeminiUsdPerPct)) &&
+    Number(options.baselineGeminiUsdPerPct) > 0
       ? Number(options.baselineGeminiUsdPerPct)
-      : baselineUsdPerPct;
-  const baselineClaudeGptUsdPerPct =
-    Number.isFinite(Number(options.baselineClaudeGptUsdPerPct)) && Number(options.baselineClaudeGptUsdPerPct) > 0
+      : explicitGlobalBaseline;
+  const explicitClaudeGptBaseline =
+    options.baselineClaudeGptUsdPerPct !== undefined &&
+    options.baselineClaudeGptUsdPerPct !== null &&
+    Number.isFinite(Number(options.baselineClaudeGptUsdPerPct)) &&
+    Number(options.baselineClaudeGptUsdPerPct) > 0
       ? Number(options.baselineClaudeGptUsdPerPct)
-      : baselineUsdPerPct;
+      : explicitGlobalBaseline;
   const statePath = options.statePath ? path.resolve(options.statePath) : getDefaultQuotaMarksPath();
   const includeSafety = options.includeSafety !== false;
   const includeDiskAgents = options.includeDiskAgents !== false;
 
   const recordedMarks = [];
+  const baselineActions = [];
   if (options.resetMarks) {
-    resetQuotaMarks(statePath, { pool: activePool });
+    resetQuotaMarks(statePath, { pool: activePool, clearBaselines: Boolean(options.resetBaselines) });
+  } else if (options.resetBaselines) {
+    clearQuotaBaseline(statePath, { pool: activePool });
+  }
+  if (options.setBaselineUsdPerPct !== undefined && options.setBaselineUsdPerPct !== null) {
+    const res = setQuotaBaseline(activePool, options.setBaselineUsdPerPct, {
+      statePath,
+      source: "manual",
+      nowMs
+    });
+    baselineActions.push({ pool: res.pool, action: "saved", usdPerPct: res.baseline.usdPerPct, source: "manual" });
+  }
+  if (options.setBaselineGeminiUsdPerPct !== undefined && options.setBaselineGeminiUsdPerPct !== null) {
+    const res = setQuotaBaseline("gemini", options.setBaselineGeminiUsdPerPct, {
+      statePath,
+      source: "manual",
+      nowMs
+    });
+    baselineActions.push({ pool: res.pool, action: "saved", usdPerPct: res.baseline.usdPerPct, source: "manual" });
+  }
+  if (options.setBaselineClaudeGptUsdPerPct !== undefined && options.setBaselineClaudeGptUsdPerPct !== null) {
+    const res = setQuotaBaseline("claude-gpt", options.setBaselineClaudeGptUsdPerPct, {
+      statePath,
+      source: "manual",
+      nowMs
+    });
+    baselineActions.push({ pool: res.pool, action: "saved", usdPerPct: res.baseline.usdPerPct, source: "manual" });
   }
   if (options.markPct !== undefined && options.markPct !== null) {
     recordedMarks.push(
@@ -1117,7 +1266,7 @@ export function auditQuota(options = {}) {
   }
   const recordedMark = recordedMarks.length === 1 ? recordedMarks[0] : recordedMarks.length > 1 ? recordedMarks[recordedMarks.length - 1] : null;
 
-  const store = loadQuotaMarks(statePath);
+  let store = loadQuotaMarks(statePath);
   const marksForActivePool =
     activePool === "all" ? store.marks : store.marks.filter((m) => (m.pool || "all") === activePool);
   let windowStartMs = nowMs - Math.round(hours * 3600 * 1000);
@@ -1160,29 +1309,69 @@ export function auditQuota(options = {}) {
     });
   }
 
-  const allCalibration = evaluateQuotaCalibration(store.marks, {
-    pool: "all",
-    baselineUsdPerPct,
-    brainRoots: options.brainRoots,
-    safety,
-    diskCustomAgents: diskAudit?.customAgents || null
-  });
-  const poolCalibrations = {
-    gemini: evaluateQuotaCalibration(store.marks, {
-      pool: "gemini",
-      baselineUsdPerPct: baselineGeminiUsdPerPct,
+  const evalAllPools = (savedBaselines) => ({
+    allCalibration: evaluateQuotaCalibration(store.marks, {
+      pool: "all",
+      baselineUsdPerPct: explicitGlobalBaseline,
+      baselineSource: explicitGlobalBaseline !== null ? "cli" : null,
+      savedBaselines,
       brainRoots: options.brainRoots,
       safety,
       diskCustomAgents: diskAudit?.customAgents || null
     }),
-    "claude-gpt": evaluateQuotaCalibration(store.marks, {
-      pool: "claude-gpt",
-      baselineUsdPerPct: baselineClaudeGptUsdPerPct,
-      brainRoots: options.brainRoots,
-      safety,
-      diskCustomAgents: diskAudit?.customAgents || null
-    })
-  };
+    poolCalibrations: {
+      gemini: evaluateQuotaCalibration(store.marks, {
+        pool: "gemini",
+        baselineUsdPerPct: explicitGeminiBaseline,
+        baselineSource: explicitGeminiBaseline !== null ? "cli" : null,
+        savedBaselines,
+        brainRoots: options.brainRoots,
+        safety,
+        diskCustomAgents: diskAudit?.customAgents || null
+      }),
+      "claude-gpt": evaluateQuotaCalibration(store.marks, {
+        pool: "claude-gpt",
+        baselineUsdPerPct: explicitClaudeGptBaseline,
+        baselineSource: explicitClaudeGptBaseline !== null ? "cli" : null,
+        savedBaselines,
+        brainRoots: options.brainRoots,
+        safety,
+        diskCustomAgents: diskAudit?.customAgents || null
+      })
+    }
+  });
+
+  let { allCalibration, poolCalibrations } = evalAllPools(store.baselines);
+
+  // Auto-calibrate personal 1x baselines from clean observed mark windows (refusing 4x-tainted windows)
+  if (options.calibrateBaseline) {
+    const hasPerPoolAnyMarks = store.marks.some((m) => m.pool === "gemini" || m.pool === "claude-gpt");
+    const targetPools =
+      activePool !== "all" ? [activePool] : hasPerPoolAnyMarks ? [...TRACKED_QUOTA_POOLS] : ["all"];
+    let anySaved = false;
+    for (const p of targetPools) {
+      const c = p === "all" ? allCalibration : poolCalibrations[p];
+      if (!c || !c.fromMark || !c.toMark || !(c.deltaPct > 0) || !(c.deltaUsd1x > 0.001) || !(c.usdPerPct > 0)) {
+        baselineActions.push({ pool: p, action: "skipped", reason: "insufficient_clean_drop" });
+        continue;
+      }
+      if ((c.customCallsInMarkWindow || 0) > 0) {
+        baselineActions.push({ pool: p, action: "rejected", reason: "custom_agent_4x_detected" });
+        continue;
+      }
+      if (p !== "claude-gpt" && safety?.status === "429_avalanche") {
+        baselineActions.push({ pool: p, action: "rejected", reason: "safety_429_avalanche" });
+        continue;
+      }
+      const res = setQuotaBaseline(p, c.usdPerPct, { statePath, source: "calibrated", nowMs });
+      baselineActions.push({ pool: p, action: "calibrated", usdPerPct: res.baseline.usdPerPct, source: "calibrated" });
+      anySaved = true;
+    }
+    if (anySaved) {
+      store = loadQuotaMarks(statePath);
+      ({ allCalibration, poolCalibrations } = evalAllPools(store.baselines));
+    }
+  }
 
   let calibration;
   if (activePool !== "all") {
@@ -1227,7 +1416,7 @@ export function auditQuota(options = {}) {
   };
 
   return stableSortObject({
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     sampledAt: new Date(nowMs).toISOString(),
     pool: activePool,
     overallStatus,
@@ -1275,6 +1464,10 @@ export function auditQuota(options = {}) {
     },
     calibration,
     poolCalibrations,
+    baselines: {
+      saved: store.baselines,
+      actions: baselineActions
+    },
     marks: {
       statePath,
       recordedNow: recordedMark,
@@ -1368,6 +1561,9 @@ export function formatQuotaAuditMarkdown(report) {
   }
   lines.push("");
 
+  const baselineSourceLabel = (src) =>
+    src === "saved" ? "已标定个人基线" : src === "cli" ? "命令行基线" : src === "default" ? "默认基线" : "未标定";
+
   const renderCalibrationBlock = (c, headingPrefix = "") => {
     lines.push(`- **${headingPrefix}校准结论**: ${c.verdictZh}`);
     if (c.fromMark && c.toMark) {
@@ -1377,7 +1573,11 @@ export function formatQuotaAuditMarkdown(report) {
     }
     if (c.impliedMultiplier !== undefined && c.impliedMultiplier !== null) {
       lines.push(
-        `- **${headingPrefix}实测折算**: 区间 1× 理论花费 **${fmtUsd(c.deltaUsd1x)}** · 每 1% 对应 **$${Number(c.usdPerPct).toFixed(2)}**（基线 $${Number(c.baselineUsdPerPct).toFixed(2)}）→ 推算倍率 **${c.impliedMultiplier}×**`
+        `- **${headingPrefix}实测折算**: 区间 1× 理论花费 **${fmtUsd(c.deltaUsd1x)}** · 每 1% 对应 **$${Number(c.usdPerPct).toFixed(2)}**（${baselineSourceLabel(c.baselineSource)} $${Number(c.baselineUsdPerPct).toFixed(2)}）→ 推算倍率 **${c.impliedMultiplier}×**`
+      );
+    } else if (c.status === "baseline_uncalibrated" && c.usdPerPct > 0) {
+      lines.push(
+        `- **${headingPrefix}实测折算**: 区间 1× 理论花费 **${fmtUsd(c.deltaUsd1x)}** · 每 1% 对应 **$${Number(c.usdPerPct).toFixed(2)}**（尚未标定个人 1× 基线）`
       );
     }
   };
@@ -1400,6 +1600,15 @@ export function formatQuotaAuditMarkdown(report) {
     }
   } else {
     renderCalibrationBlock(cal);
+  }
+  const savedBaselines = report.baselines?.saved || {};
+  const savedKeys = Object.keys(savedBaselines);
+  if (savedKeys.length > 0) {
+    const bSummary = savedKeys
+      .sort(compareAscii)
+      .map((k) => `${k}=$${Number(savedBaselines[k].usdPerPct).toFixed(2)}/1%`)
+      .join(", ");
+    lines.push(`- **已标定个人 1× 基线**: ${bSummary}`);
   }
   const counts = report.marks?.countsByPool;
   const countDetail = counts
@@ -1424,9 +1633,14 @@ export function parseCliArgs(argv) {
     markNote: "",
     listMarks: false,
     resetMarks: false,
-    baselineUsdPerPct: DEFAULT_BASELINE_USD_PER_PCT,
+    resetBaselines: false,
+    calibrateBaseline: false,
+    baselineUsdPerPct: null,
     baselineGeminiUsdPerPct: null,
     baselineClaudeGptUsdPerPct: null,
+    setBaselineUsdPerPct: null,
+    setBaselineGeminiUsdPerPct: null,
+    setBaselineClaudeGptUsdPerPct: null,
     workspace: process.cwd(),
     configDir: undefined,
     workspaceOnly: false,
@@ -1464,6 +1678,10 @@ export function parseCliArgs(argv) {
       opts.listMarks = true;
     } else if (a === "--reset-marks") {
       opts.resetMarks = true;
+    } else if (a === "--reset-baselines") {
+      opts.resetBaselines = true;
+    } else if (a === "--calibrate-baseline") {
+      opts.calibrateBaseline = true;
     } else if (a === "--no-safety") {
       opts.includeSafety = false;
     } else if (a === "--workspace-only") {
@@ -1513,6 +1731,21 @@ export function parseCliArgs(argv) {
       const eq = a.indexOf("=");
       const next = eq >= 0 ? a.slice(eq + 1) : args[++i];
       opts.baselineClaudeGptUsdPerPct = parsePositiveUsdOpt("--baseline-claude-gpt", next);
+    } else if (a === "--set-baseline" || a.startsWith("--set-baseline=")) {
+      const next = a.includes("=") ? a.slice("--set-baseline=".length) : args[++i];
+      opts.setBaselineUsdPerPct = parsePositiveUsdOpt("--set-baseline", next);
+    } else if (a === "--set-baseline-gemini" || a.startsWith("--set-baseline-gemini=")) {
+      const next = a.includes("=") ? a.slice("--set-baseline-gemini=".length) : args[++i];
+      opts.setBaselineGeminiUsdPerPct = parsePositiveUsdOpt("--set-baseline-gemini", next);
+    } else if (
+      a === "--set-baseline-claude-gpt" ||
+      a.startsWith("--set-baseline-claude-gpt=") ||
+      a === "--set-baseline-claude" ||
+      a.startsWith("--set-baseline-claude=")
+    ) {
+      const eq = a.indexOf("=");
+      const next = eq >= 0 ? a.slice(eq + 1) : args[++i];
+      opts.setBaselineClaudeGptUsdPerPct = parsePositiveUsdOpt("--set-baseline-claude-gpt", next);
     } else if (a === "--workspace" || a.startsWith("--workspace=")) {
       const next = a.includes("=") ? a.slice("--workspace=".length) : args[++i];
       if (!next || (!a.includes("=") && next.startsWith("-"))) throw new Error("Missing path after --workspace");
@@ -1544,26 +1777,31 @@ Usage:
   npm run quota:audit -- [options]
 
 Options:
-  --hours <1..720>              Rolling transcript & safety window in hours (default: ${DEFAULT_HOURS})
-  --pool <all|gemini|claude-gpt> Filter billing/marks to one model quota pool (default: all)
-  --since-mark                  Measure transcript usage since the most recent saved quota mark
-  --mark <0..100>               Record remaining weekly quota % for --pool (default: all)
-  --mark-gemini <0..100>        Record remaining weekly quota % for the Gemini model pool
-  --mark-claude-gpt <0..100>    Record remaining weekly quota % for the Claude/GPT model pool (alias: --mark-claude)
-  --note <text>                 Optional note attached to --mark*
-  --list-marks                  Show saved weekly quota marks (filtered by --pool when set)
-  --reset-marks                 Clear saved weekly quota marks (filtered by --pool when set)
-  --baseline-usd <num>          Reference 1x equivalent USD per 1% weekly quota (default: ${DEFAULT_BASELINE_USD_PER_PCT})
-  --baseline-gemini <num>       Override 1x USD per 1% reference for the Gemini pool
-  --baseline-claude-gpt <num>   Override 1x USD per 1% reference for the Claude/GPT pool
-  --workspace <dir>             Workspace root for disk agents/*.md scan (default: cwd)
-  --config-dir <dir>            Antigravity config root (default: ~/.gemini/config)
-  --workspace-only              Only scan workspace agents/*.md (skip global/plugins)
-  --state-path <file>           Override quota-marks.json path
-  --brain-root <dir>            Override Antigravity brain root (repeatable)
-  --no-safety                   Skip #1886 background safety-monitor log scan
-  --json                        Output machine-readable JSON
-  -h, --help                    Show this help
+  --hours <1..720>                 Rolling transcript & safety window in hours (default: ${DEFAULT_HOURS})
+  --pool <all|gemini|claude-gpt>   Filter billing/marks to one model quota pool (default: all)
+  --since-mark                     Measure transcript usage since the most recent saved quota mark
+  --mark <0..100>                  Record remaining weekly quota % for --pool (default: all)
+  --mark-gemini <0..100>           Record remaining weekly quota % for the Gemini model pool
+  --mark-claude-gpt <0..100>       Record remaining weekly quota % for the Claude/GPT model pool (alias: --mark-claude)
+  --note <text>                    Optional note attached to --mark*
+  --list-marks                     Show saved weekly quota marks & personal baselines (filtered by --pool when set)
+  --reset-marks                    Clear saved weekly quota marks (preserves saved baselines unless --reset-baselines)
+  --calibrate-baseline             Save clean observed USD/1% from current mark drops as your personal 1x baseline
+  --set-baseline <num>             Persist personal 1x USD/1% baseline for --pool
+  --set-baseline-gemini <num>      Persist personal 1x USD/1% baseline for the Gemini pool
+  --set-baseline-claude-gpt <num>  Persist personal 1x USD/1% baseline for the Claude/GPT pool (alias: --set-baseline-claude)
+  --reset-baselines                Clear saved personal 1x baselines (filtered by --pool when set)
+  --baseline-usd <num>             One-off 1x equivalent USD/1% override (default for --pool all: ${DEFAULT_BASELINE_USD_PER_PCT})
+  --baseline-gemini <num>          One-off 1x USD/1% override for the Gemini pool
+  --baseline-claude-gpt <num>      One-off 1x USD/1% override for the Claude/GPT pool
+  --workspace <dir>                Workspace root for disk agents/*.md scan (default: cwd)
+  --config-dir <dir>               Antigravity config root (default: ~/.gemini/config)
+  --workspace-only                 Only scan workspace agents/*.md (skip global/plugins)
+  --state-path <file>              Override quota-marks.json path
+  --brain-root <dir>               Override Antigravity brain root (repeatable)
+  --no-safety                      Skip #1886 background safety-monitor log scan
+  --json                           Output machine-readable JSON
+  -h, --help                       Show this help
 `);
 }
 
@@ -1577,13 +1815,27 @@ function main() {
     const statePath = opts.statePath || getDefaultQuotaMarksPath();
     const store = loadQuotaMarks(statePath);
     const marks = opts.pool === "all" ? store.marks : store.marks.filter((m) => (m.pool || "all") === opts.pool);
+    const baselines =
+      opts.pool === "all"
+        ? store.baselines
+        : store.baselines[opts.pool]
+          ? { [opts.pool]: store.baselines[opts.pool] }
+          : {};
     if (opts.json) {
-      process.stdout.write(JSON.stringify({ statePath, pool: opts.pool, marks }, null, 2) + "\n");
-    } else if (marks.length === 0) {
-      process.stdout.write(`No quota marks saved in ${statePath}${opts.pool !== "all" ? ` for pool '${opts.pool}'` : ""}.\n`);
+      process.stdout.write(JSON.stringify({ statePath, pool: opts.pool, baselines, marks }, null, 2) + "\n");
     } else {
-      for (const m of marks) {
-        process.stdout.write(`${m.ts}  [${m.pool || "all"}]  ${m.remainingPct}%${m.note ? `  (${m.note})` : ""}\n`);
+      const bKeys = Object.keys(baselines).sort(compareAscii);
+      if (bKeys.length > 0) {
+        process.stdout.write(
+          `Saved personal 1x baselines: ${bKeys.map((k) => `[${k}] $${Number(baselines[k].usdPerPct).toFixed(2)}/1% (${baselines[k].source})`).join(" | ")}\n`
+        );
+      }
+      if (marks.length === 0) {
+        process.stdout.write(`No quota marks saved in ${statePath}${opts.pool !== "all" ? ` for pool '${opts.pool}'` : ""}.\n`);
+      } else {
+        for (const m of marks) {
+          process.stdout.write(`${m.ts}  [${m.pool || "all"}]  ${m.remainingPct}%${m.note ? `  (${m.note})` : ""}\n`);
+        }
       }
     }
     return;

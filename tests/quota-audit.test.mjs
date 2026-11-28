@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   auditQuota,
+  clearQuotaBaseline,
   evaluateQuotaCalibration,
   formatQuotaAuditMarkdown,
   isBuiltinSubagentType,
@@ -16,7 +17,8 @@ import {
   recordQuotaMark,
   resetQuotaMarks,
   resolveModelPricing,
-  resolveQuotaPool
+  resolveQuotaPool,
+  setQuotaBaseline
 } from "../scripts/quota-audit.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -329,8 +331,8 @@ test("quota-audit: dual-pool (gemini vs claude-gpt) isolates concurrent model us
     recordQuotaMark(68, { statePath: marksPath, nowMs: t0, pool: "gemini", note: "start" });
     recordQuotaMark(83, { statePath: marksPath, nowMs: t0, pool: "claude-gpt", note: "start" });
 
-    // Dual-pool end marks at t1: Gemini 67% (-1% for $6 => 1.0x), Claude/GPT 81% (-2% for $12 => 1.0x)
-    const report = auditQuota({
+    // Dual-pool end marks at t1 BEFORE personal baselines are set => baseline_uncalibrated (no false $6/1% alert!)
+    const uncalibrated = auditQuota({
       brainRoots: [brainRoot],
       workspace: wsDir,
       configDir: cfgDir,
@@ -343,26 +345,50 @@ test("quota-audit: dual-pool (gemini vs claude-gpt) isolates concurrent model us
       includeSafety: false
     });
 
+    assert.equal(uncalibrated.overallStatus, "clean_1x");
+    assert.equal(uncalibrated.layer3Billing.pools.gemini.usd1x, 6);
+    assert.equal(uncalibrated.layer3Billing.pools["claude-gpt"].usd1x, 12);
+    assert.equal(uncalibrated.layer3Billing.pools.other.steps, 0);
+    assert.equal(uncalibrated.poolCalibrations.gemini.status, "baseline_uncalibrated");
+    assert.equal(uncalibrated.poolCalibrations.gemini.usdPerPct, 6);
+    assert.equal(uncalibrated.poolCalibrations.gemini.impliedMultiplier, null);
+    assert.equal(uncalibrated.poolCalibrations["claude-gpt"].status, "baseline_uncalibrated");
+    assert.equal(uncalibrated.poolCalibrations["claude-gpt"].usdPerPct, 6);
+
+    // Auto-calibrate personal 1x baselines from the clean window => both pools lock at $6/1% and pass at 1.0x
+    const report = auditQuota({
+      brainRoots: [brainRoot],
+      workspace: wsDir,
+      configDir: cfgDir,
+      statePath: marksPath,
+      calibrateBaseline: true,
+      hours: 6,
+      nowMs: t1,
+      includeSafety: false
+    });
+
     assert.equal(report.overallStatus, "clean_1x");
-    assert.equal(report.layer3Billing.pools.gemini.usd1x, 6);
-    assert.equal(report.layer3Billing.pools["claude-gpt"].usd1x, 12);
-    assert.equal(report.layer3Billing.pools.other.steps, 0);
     assert.equal(report.poolCalibrations.gemini.status, "pass_1x");
+    assert.equal(report.poolCalibrations.gemini.baselineSource, "saved");
     assert.equal(report.poolCalibrations.gemini.deltaUsd1x, 6);
     assert.equal(report.poolCalibrations.gemini.impliedMultiplier, 1);
     assert.equal(report.poolCalibrations["claude-gpt"].status, "pass_1x");
+    assert.equal(report.poolCalibrations["claude-gpt"].baselineSource, "saved");
     assert.equal(report.poolCalibrations["claude-gpt"].deltaUsd1x, 12);
     assert.equal(report.poolCalibrations["claude-gpt"].impliedMultiplier, 1);
 
     const md = formatQuotaAuditMarkdown(report);
     assert.ok(md.includes("Gemini 模型池"));
     assert.ok(md.includes("Claude 与 GPT 模型池"));
+    assert.ok(md.includes("已标定个人 1× 基线"));
 
-    // Resetting only gemini pool preserves claude-gpt marks
+    // Resetting only gemini marks preserves claude-gpt marks AND preserves saved personal baselines by default
     resetQuotaMarks(marksPath, { pool: "gemini" });
-    const afterPartialReset = loadQuotaMarks(marksPath).marks;
-    assert.equal(afterPartialReset.filter((m) => m.pool === "gemini").length, 0);
-    assert.equal(afterPartialReset.filter((m) => m.pool === "claude-gpt").length, 2);
+    const afterPartialReset = loadQuotaMarks(marksPath);
+    assert.equal(afterPartialReset.marks.filter((m) => m.pool === "gemini").length, 0);
+    assert.equal(afterPartialReset.marks.filter((m) => m.pool === "claude-gpt").length, 2);
+    assert.equal(afterPartialReset.baselines.gemini.usdPerPct, 6);
+    assert.equal(afterPartialReset.baselines["claude-gpt"].usdPerPct, 6);
 
     // CLI dual-mark flags end-to-end
     const cliRes = spawnSync(
@@ -392,6 +418,110 @@ test("quota-audit: dual-pool (gemini vs claude-gpt) isolates concurrent model us
     const cliJson = JSON.parse(cliRes.stdout);
     assert.equal(cliJson.marks.countsByPool.gemini, 1);
     assert.equal(cliJson.marks.countsByPool["claude-gpt"], 3);
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("quota-audit: per-pool personal baselines prevent Claude false alerts, catch Ultra Gemini 4x drops, and reject 4x-tainted calibration", () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-quota-baselines-"));
+  try {
+    const brainRoot = path.join(baseDir, "brain");
+    const cfgDir = path.join(baseDir, "cfg");
+    const wsDir = path.join(baseDir, "ws");
+    const marksPath = path.join(baseDir, "quota-marks.json");
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.mkdirSync(wsDir, { recursive: true });
+
+    const t0 = Date.parse("2026-11-28T08:00:00Z");
+    const tMid = Date.parse("2026-11-28T09:00:00Z");
+    const t1 = Date.parse("2026-11-28T10:00:00Z");
+
+    // Gemini Ultra pool: $20.00 actual spend (would look 1.2x under old $6 baseline if dropped 4%, but 4.0x under $20 personal baseline!)
+    // Input 6,666,667 tokens on gemini-4-neon-xhigh ($3/1M) = $20.00
+    writeTranscript(
+      brainRoot,
+      "conv-ultra-gemini",
+      [
+        { step_index: 0, type: "USER_INPUT", created_at: new Date(tMid).toISOString(), content: "gemini work" },
+        { step_index: 1, type: "PLANNER_RESPONSE", created_at: new Date(tMid).toISOString(), model: "gemini-4-neon-xhigh", input_tokens: 6666667, cache_read_tokens: 0, output_tokens: 0 }
+      ],
+      t1
+    );
+    // Claude pool: $1.80 spend (450,000 input on claude-opus-5-5-high at $4/1M) with 4% drop => $0.45/1%
+    writeTranscript(
+      brainRoot,
+      "conv-claude-small-pool",
+      [
+        { step_index: 0, type: "USER_INPUT", created_at: new Date(tMid).toISOString(), content: "claude work" },
+        { step_index: 1, type: "PLANNER_RESPONSE", created_at: new Date(tMid).toISOString(), model: "claude-opus-5-5-high", input_tokens: 450000, cache_read_tokens: 0, output_tokens: 0 }
+      ],
+      t1
+    );
+
+    // Persist realistic Ultra Gemini ($20/1%) and Claude ($0.45/1%) personal baselines
+    setQuotaBaseline("gemini", 20.0, { statePath: marksPath, nowMs: t0 });
+    setQuotaBaseline("claude-gpt", 0.45, { statePath: marksPath, nowMs: t0 });
+
+    // Gemini drops 4% for $20 ($5/1% => 4.0x ALERT!), Claude drops 4% for $1.80 ($0.45/1% => 1.0x PASS!)
+    recordQuotaMark(70, { statePath: marksPath, nowMs: t0, pool: "gemini" });
+    recordQuotaMark(66, { statePath: marksPath, nowMs: t1, pool: "gemini" });
+    recordQuotaMark(84, { statePath: marksPath, nowMs: t0, pool: "claude-gpt" });
+    recordQuotaMark(80, { statePath: marksPath, nowMs: t1, pool: "claude-gpt" });
+
+    const rep = auditQuota({
+      brainRoots: [brainRoot],
+      workspace: wsDir,
+      configDir: cfgDir,
+      statePath: marksPath,
+      hours: 6,
+      nowMs: t1,
+      includeSafety: false
+    });
+    assert.equal(rep.poolCalibrations.gemini.status, "alert_suspected_4x");
+    assert.equal(rep.poolCalibrations.gemini.impliedMultiplier, 4);
+    assert.equal(rep.poolCalibrations["claude-gpt"].status, "pass_1x");
+    assert.equal(rep.poolCalibrations["claude-gpt"].impliedMultiplier, 1);
+    assert.equal(rep.overallStatus, "alert_4x_risk");
+
+    // Clearing baselines + injecting a custom-agent 4x session: uncalibrated pool must STILL alert and refuse --calibrate-baseline
+    clearQuotaBaseline(marksPath, { pool: "all" });
+    writeTranscript(
+      brainRoot,
+      "conv-main-spawner",
+      [
+        { step_index: 0, type: "USER_INPUT", created_at: new Date(tMid).toISOString(), content: "spawn" },
+        { step_index: 1, type: "PLANNER_RESPONSE", created_at: new Date(tMid).toISOString(), model: "gemini-4-neon-xhigh", input_tokens: 1000, cache_read_tokens: 0, output_tokens: 10, tool_calls: [{ name: "invoke_subagent", args: { TypeName: '"cmd-verifier"', Role: '"Bad"' } }] },
+        { step_index: 2, type: "GENERIC", created_at: new Date(tMid).toISOString(), content: '{"conversationId":"conv-custom-tainted"}' }
+      ],
+      t1
+    );
+    writeTranscript(
+      brainRoot,
+      "conv-custom-tainted",
+      [
+        { step_index: 0, type: "SYSTEM_MESSAGE", created_at: new Date(tMid).toISOString(), content: "[Message] sender=conv-main-spawner" },
+        { step_index: 1, type: "PLANNER_RESPONSE", created_at: new Date(tMid).toISOString(), model: "gemini-4-neon-xhigh", input_tokens: 100000, cache_read_tokens: 0, output_tokens: 100 }
+      ],
+      t1
+    );
+
+    const taintedCal = auditQuota({
+      brainRoots: [brainRoot],
+      workspace: wsDir,
+      configDir: cfgDir,
+      statePath: marksPath,
+      pool: "gemini",
+      calibrateBaseline: true,
+      hours: 6,
+      nowMs: t1,
+      includeSafety: false
+    });
+    assert.equal(taintedCal.poolCalibrations.gemini.status, "alert_suspected_4x");
+    assert.equal(taintedCal.baselines.saved.gemini, undefined);
+    assert.ok(
+      taintedCal.baselines.actions.some((a) => a.pool === "gemini" && a.action === "rejected" && a.reason === "custom_agent_4x_detected")
+    );
   } finally {
     fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
